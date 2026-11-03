@@ -3,7 +3,7 @@ from datetime import datetime
 from aiogram import Router, F
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 
-from app.state import iiko_service, admin_ids, manager_ids
+from app.state import iiko_service, admin_ids, manager_ids, iiko_async_service, ADMIN_ID
 from app.domain.constants import MAIN_KEYWORDS
 from app.keyboards.admin_kb import get_iiko_menu
 
@@ -11,7 +11,7 @@ router = Router()
 
 @router.callback_query(F.data == "iiko_view")
 async def cb_iiko_view(callback: CallbackQuery, skip_answer=False):
-    if callback.from_user.id not in admin_ids and callback.from_user.id not in manager_ids: return
+    if callback.from_user.id != ADMIN_ID and callback.from_user.id not in manager_ids: return
     
     if not skip_answer:
         try: await callback.answer()
@@ -40,7 +40,7 @@ async def cb_iiko_view(callback: CallbackQuery, skip_answer=False):
 
 @router.callback_query(F.data == "iiko_scan_techcards")
 async def cb_iiko_scan(callback: CallbackQuery):
-    if callback.from_user.id not in admin_ids and callback.from_user.id not in manager_ids: return
+    if callback.from_user.id != ADMIN_ID and callback.from_user.id not in manager_ids: return
     
     try: await callback.answer("Сканируем...")
     except Exception: pass
@@ -52,12 +52,12 @@ async def cb_iiko_scan(callback: CallbackQuery):
         await asyncio.sleep(2)
         await cb_iiko_view(callback, skip_answer=True)
     except Exception as e:
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_panel")]])
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_other_menu")]])
         await callback.message.edit_text(f"❌ Ошибка при сканировании:\n<code>{e}</code>", reply_markup=keyboard, parse_mode="HTML")
 
 @router.callback_query(F.data == "iiko_current_stock")
 async def cb_iiko_current_stock(callback: CallbackQuery, skip_answer=False):
-    if callback.from_user.id not in admin_ids and callback.from_user.id not in manager_ids: return
+    if callback.from_user.id != ADMIN_ID and callback.from_user.id not in manager_ids: return
     
     if not skip_answer:
         try: await callback.answer()
@@ -66,7 +66,8 @@ async def cb_iiko_current_stock(callback: CallbackQuery, skip_answer=False):
     if not iiko_service.iiko_stock_cache:
         await callback.message.edit_text("⏳ <b>Запрашиваем остатки из iiko...</b>\n\nЭто займёт 2-3 секунды.")
         try:
-            await iiko_service.fetch_fast_stock()
+            stock_data = await iiko_async_service.get_stock_balance()
+            iiko_service.iiko_stock_cache = stock_data
         except Exception as e:
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🔄 Повторить", callback_data="iiko_current_stock")],
@@ -98,7 +99,7 @@ async def cb_iiko_current_stock(callback: CallbackQuery, skip_answer=False):
 
 @router.callback_query(F.data == "iiko_refresh_stock")
 async def cb_iiko_refresh_stock(callback: CallbackQuery):
-    if callback.from_user.id not in admin_ids and callback.from_user.id not in manager_ids: return
+    if callback.from_user.id != ADMIN_ID and callback.from_user.id not in manager_ids: return
     
     try: await callback.answer("Обновляем...")
     except Exception: pass
@@ -108,7 +109,7 @@ async def cb_iiko_refresh_stock(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("iiko_cat_"))
 async def cb_iiko_category(callback: CallbackQuery):
-    if callback.from_user.id not in admin_ids and callback.from_user.id not in manager_ids: return
+    if callback.from_user.id != ADMIN_ID and callback.from_user.id not in manager_ids: return
     
     try: await callback.answer()
     except Exception: pass
@@ -134,7 +135,7 @@ async def cb_iiko_category(callback: CallbackQuery):
 
 @router.callback_query(F.data == "iiko_movements")
 async def cb_iiko_movements(callback: CallbackQuery):
-    if callback.from_user.id not in admin_ids and callback.from_user.id not in manager_ids: return
+    if callback.from_user.id != ADMIN_ID and callback.from_user.id not in manager_ids: return
     
     try: await callback.answer()
     except Exception: pass
@@ -147,105 +148,101 @@ async def cb_iiko_movements(callback: CallbackQuery):
             raise Exception("Не удалось получить токен iiko.")
 
         product_map = await asyncio.to_thread(iiko_service.sync_get_products, token)
+        groups_map = await asyncio.to_thread(iiko_service.sync_get_groups, token)
+        
         sales = await asyncio.to_thread(iiko_service.sync_get_documents, token, "sales_document")
         writeoffs = await asyncio.to_thread(iiko_service.sync_get_documents, token, "writeoff_document")
-        incomings = await asyncio.to_thread(iiko_service.sync_get_documents, token, "incoming_invoice")
-        transfers = await asyncio.to_thread(iiko_service.sync_get_documents, token, "internal_transfer")
 
-        main_consumption = {}
-        sold_dishes = {}
+        total_revenue = 0.0
+        grouped_sales = {}  
         direct_writeoffs = {}
-        incoming_items = {}
-        transfer_items = {}
+
+        exclude_keywords = ["молоко", "сироп", "арахис", "лимон", "шот", "на вынос", "доп", "пудра", "корица", "маршмеллоу"]
 
         for doc in sales:
+            total_revenue += float(doc.get("sum", 0))
             for item in doc.get("items", []):
                 dish_id = item.get("productId") or item.get("product") or item.get("product_id")
                 sold_qty = float(item.get("amount", 0))
-                if dish_id and sold_qty > 0:
-                    dish_name = product_map.get(dish_id, {}).get("name", "Неизвестное блюдо")
-                    sold_dishes[dish_name] = sold_dishes.get(dish_name, 0) + sold_qty
+                if not dish_id or sold_qty <= 0: continue
+                
+                p_info = product_map.get(dish_id)
+                if not p_info: continue
+                
+                dish_name = p_info.get("name", "Неизвестное блюдо")
+                dish_name_lower = dish_name.lower()
 
-                    if dish_id in iiko_service.cached_tech_cards_map:
-                        for ing_id, ing_qty in iiko_service.cached_tech_cards_map[dish_id].items():
-                            ing_name = product_map.get(ing_id, {}).get("name", "Неизвестный ингредиент")
-                            total_ing = ing_qty * sold_qty
-                            main_consumption[ing_name] = main_consumption.get(ing_name, 0) + total_ing
+                if p_info.get("type") in ["MODIFIER", "GOODS"] and any(kw in dish_name_lower for kw in exclude_keywords): continue
+                
+                clean_name = dish_name.split('_')[0].strip() 
+                group_name = groups_map.get(p_info.get("group_id"), "Без категории")
+                
+                if group_name not in grouped_sales:
+                    grouped_sales[group_name] = {}
+                grouped_sales[group_name][clean_name] = grouped_sales[group_name].get(clean_name, 0) + sold_qty
 
         for doc in writeoffs:
             for item in doc.get("items", []):
                 prod_id = item.get("productId") or item.get("product") or item.get("product_id")
                 qty = float(item.get("amount", 0))
-                if prod_id and qty > 0:
-                    prod_name = product_map.get(prod_id, {}).get("name", "Неизвестный товар")
-                    direct_writeoffs[prod_name] = direct_writeoffs.get(prod_name, 0) + qty
-
-        for doc in incomings:
-            for item in doc.get("items", []):
-                prod_id = item.get("product") or item.get("productId")
-                qty = float(item.get("amount", 0))
-                if prod_id and qty > 0:
-                    prod_name = product_map.get(prod_id, {}).get("name", "Неизвестный товар")
-                    incoming_items[prod_name] = incoming_items.get(prod_name, 0) + qty
-
-        for doc in transfers:
-            for item in doc.get("items", []):
-                prod_id = item.get("product") or item.get("productId")
-                qty = float(item.get("amount", 0))
-                if prod_id and qty > 0:
-                    prod_name = product_map.get(prod_id, {}).get("name", "Неизвестный товар")
-                    transfer_items[prod_name] = transfer_items.get(prod_name, 0) + qty
+                if not prod_id or qty <= 0: continue
+                p_info = product_map.get(prod_id)
+                if not p_info or p_info.get("type") == "MODIFIER": continue
+                
+                prod_name = p_info.get("name", "Неизвестный товар")
+                direct_writeoffs[prod_name] = direct_writeoffs.get(prod_name, 0) + qty
 
         today_str = datetime.now().strftime("%d.%m.%Y")
         update_time = datetime.now().strftime("%H:%M")
-        text = f"🔄 <b>Движения за {today_str}</b>\n<i>Последнее обновление: {update_time}</i>\n\n"
+        
+        def get_priority(g_name):
+            g = g_name.upper()
+            if "КЛАССИКА КОФЕ" in g: return 1
+            if "ЗАВТРАК" in g: return 2
+            if "ЛАНЧ" in g: return 3
+            if "АВТОРСКОЙ КОФЕ" in g: return 4
+            if "ОСЕН" in g: return 5
+            if "ЛЕТО" in g: return 6
+            return 99
 
-        found_something = False
+        sorted_groups = sorted(grouped_sales.keys(), key=get_priority)
 
-        main_lines = []
-        for name, qty in main_consumption.items():
-            if any(k in name.lower() for k in MAIN_KEYWORDS):
-                qty_str = str(int(qty)) if qty.is_integer() else f"{qty:.3f}".rstrip('0').rstrip('.')
-                main_lines.append(f"• {name}: <b>{qty_str}</b>")
-        for name, qty in direct_writeoffs.items():
-            if any(k in name.lower() for k in MAIN_KEYWORDS):
-                qty_str = str(int(qty)) if qty.is_integer() else f"{qty:.3f}".rstrip('0').rstrip('.')
-                main_lines.append(f"• {name} (списание): <b>{qty_str}</b>")
+        text = f"🔄 <b>Движения за {today_str}</b>\n<i>Обновлено в {update_time}</i>\n\n"
+        text += f"💰 <b>Текущая касса:</b> <b>{total_revenue:,.2f} ₽</b>\n\n"
 
-        if main_lines:
-            text += "⭐ <b>ГЛАВНОЕ (Расход/Списание):</b>\n" + "\n".join(main_lines) + "\n\n"
-            found_something = True
+        kitchen_header = False
+        signature_header = False
+        other_header = False
 
-        if sold_dishes:
-            text += "☕ <b>Продажи (Блюда):</b>\n"
-            for name, qty in sorted(sold_dishes.items()):
-                text += f"• {name}: <b>{qty:g}</b>\n"
+        for group_name in sorted_groups:
+            g_upper = group_name.upper()
+            
+            if get_priority(group_name) == 99 and not other_header:
+                text += "📦 <b>ОСТАЛЬНОЕ МЕНЮ</b>\n\n"
+                other_header = True
+                
+            if ("ЗАВТРАК" in g_upper or "ЛАНЧ" in g_upper) and not kitchen_header:
+                text += "🍳 <b>КУХНЯ</b>\n\n"
+                kitchen_header = True
+                
+            if ("АВТОРСКОЙ КОФЕ" in g_upper or "ОСЕН" in g_upper or "ЛЕТО" in g_upper) and not signature_header:
+                text += "✨ <b>ФИРМЕННЫЕ</b>\n\n"
+                signature_header = True
+
+            text += f"<b>{group_name.upper()}</b>\n"
+            for dish_name in sorted(grouped_sales[group_name].keys()):
+                qty = grouped_sales[group_name][dish_name]
+                text += f"• {dish_name}: <b>{qty:g}</b>\n"
             text += "\n"
-            found_something = True
 
         if direct_writeoffs:
-            text += "📉 <b>Списания (Товары):</b>\n"
+            text += "📉 <b>СПИСАНИЯ:</b>\n"
             for name, qty in sorted(direct_writeoffs.items()):
                 text += f"• {name}: <b>{qty:g}</b>\n"
             text += "\n"
-            found_something = True
 
-        if incoming_items:
-            text += "📦 <b>Приходы (Поставки):</b>\n"
-            for name, qty in sorted(incoming_items.items()):
-                text += f"• {name}: <b>{qty:g}</b>\n"
-            text += "\n"
-            found_something = True
-
-        if transfer_items:
-            text += "🔁 <b>Перемещения между складами:</b>\n"
-            for name, qty in sorted(transfer_items.items()):
-                text += f"• {name}: <b>{qty:g}</b>\n"
-            text += "\n"
-            found_something = True
-
-        if not found_something:
-            text = f"🔄 <b>Движения за {today_str}</b> (обновлено в {update_time}):\n\n<i>Движений не найдено.</i>"
+        if not grouped_sales and not direct_writeoffs:
+            text += "<i>Движений не найдено.</i>"
 
         if len(text) > 4000:
             text = text[:3900] + "...\n\n<i>(Слишком много позиций, список обрезан)</i>"

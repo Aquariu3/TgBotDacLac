@@ -1,18 +1,27 @@
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-def get_admin_panel_keyboard(is_super: bool) -> InlineKeyboardMarkup:
+def get_admin_panel_keyboard(is_full_access: bool) -> InlineKeyboardMarkup:
     kb = [
-        [InlineKeyboardButton(text="✏️ Изменить позиции", callback_data="admin_edit_items")], # НОВАЯ КНОПКА
-        [InlineKeyboardButton(text="📊 Остатки по iiko", callback_data="iiko_view")],
-        [InlineKeyboardButton(text="🔄 Движения за сегодня", callback_data="iiko_movements")],
-        [InlineKeyboardButton(text="👥 Пользователи и история", callback_data="admin_users")],
-        [InlineKeyboardButton(text="📢 Отправить уведомление", callback_data="admin_notify")],
+        [InlineKeyboardButton(text="✏️ Изменить позиции", callback_data="admin_edit_items")]
     ]
-    if is_super:
-        kb.append([InlineKeyboardButton(text="👑 Добавить администратора", callback_data="admin_add_admin")])
-        kb.append([InlineKeyboardButton(text="💼 Добавить управляющего", callback_data="admin_add_manager")])
+    if is_full_access:
+        kb.extend([
+            [InlineKeyboardButton(text="📊 Остатки по iiko", callback_data="iiko_view")],
+            [InlineKeyboardButton(text="🔄 Движения за сегодня", callback_data="iiko_movements")],
+            [InlineKeyboardButton(text="👥 Пользователи и история", callback_data="admin_users")],
+            [InlineKeyboardButton(text="📢 Отправить уведомление", callback_data="admin_notify")],
+            [InlineKeyboardButton(text="⚙️ Остальное", callback_data="admin_other_menu")]
+        ])
     kb.append([InlineKeyboardButton(text="⬅️ Назад в главное меню", callback_data="main_menu")])
     return InlineKeyboardMarkup(inline_keyboard=kb)
+
+def get_admin_other_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👑 Добавить администратора", callback_data="admin_add_admin")],
+        [InlineKeyboardButton(text="💼 Добавить управляющего", callback_data="admin_add_manager")],
+        [InlineKeyboardButton(text="🔄 Обновить техкарты", callback_data="iiko_scan_techcards")],
+        [InlineKeyboardButton(text="⬅️ Назад в панель", callback_data="admin_panel")]
+    ])
 
 def get_users_to_promote_keyboard(users_db: dict, current_role_ids: set, callback_prefix: str) -> InlineKeyboardMarkup:
     buttons = []
@@ -43,6 +52,6 @@ def get_iiko_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 Текущие остатки", callback_data="iiko_current_stock")],
         [InlineKeyboardButton(text="🔄 Движения за сегодня", callback_data="iiko_movements")],
-        [InlineKeyboardButton(text="⚙️ Обновить техкарты", callback_data="iiko_scan_techcards")],
+        # Кнопка "Обновить техкарты" убрана отсюда
         [InlineKeyboardButton(text="⬅️ Назад в панель", callback_data="admin_panel")]
     ])

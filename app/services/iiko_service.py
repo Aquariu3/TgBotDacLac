@@ -75,7 +75,7 @@ class IikoService:
         offset = 0
         limit = 1000
         while True:
-            payload = {"limit": limit, "offset": offset}
+            payload = {"filters": [], "limit": limit, "offset": offset}
             resp = requests.post(url, json=payload, headers=headers, timeout=60)
             if resp.status_code != 200:
                 print(f"⚠️ Ошибка загрузки номенклатуры: {resp.status_code} - {resp.text}")
@@ -83,15 +83,43 @@ class IikoService:
             items = resp.json().get("items", [])
             if not items: break
             for p in items:
-                pid = p.get("productId")
+                pid = p.get("productId") or p.get("id")
                 name = p.get("name", "Без названия")
                 ptype = p.get("type", "UNKNOWN")
-                if pid: product_map[pid] = {"name": name, "type": ptype}
+                group_id = p.get("parentGroupId")
+                if pid: product_map[pid] = {"name": name, "type": ptype, "group_id": group_id}
             if len(items) < limit: break
             offset += limit
         self.iiko_products_cache = product_map
         self.iiko_products_cache_time = now
         return product_map
+
+    def sync_get_groups(self, token):
+        """Возвращает словарь {group_id: group_name}"""
+        url = "https://api-ru.iiko.services/api/nomenclature/v2/group/list"
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        groups_map = {}
+        offset = 0
+        limit = 1000
+        while True:
+            payload = {"filters": [], "limit": limit, "offset": offset}
+            resp = requests.post(url, json=payload, headers=headers, timeout=60)
+            if resp.status_code != 200:
+                print(f"⚠️ Ошибка загрузки групп: {resp.status_code} - {resp.text}")
+                break
+            data = resp.json()
+            items = data.get("groups", [])
+            if not items:
+                break
+            for g in items:
+                gid = g.get("groupId") or g.get("id")
+                gname = g.get("name")
+                if gid and gname:
+                    groups_map[gid] = gname
+            if len(items) < limit:
+                break
+            offset += limit
+        return groups_map
 
     def sync_get_documents(self, token, doc_type):
         today = datetime.now().strftime("%Y-%m-%d")
@@ -104,13 +132,7 @@ class IikoService:
             if resp.status_code != 200:
                 print(f"⚠️ Ошибка запроса {doc_type}: {resp.status_code} - {resp.text}")
                 return []
-            data = resp.json()
-            if isinstance(data, list):
-                return data
-            if isinstance(data, dict):
-                return data.get("items") or data.get("documents") or []
-            logging.warning(f"Неожиданный формат ответа для {doc_type}: {type(data).__name__}")
-            return []
+            return resp.json()
         except Exception as e:
             print(f"⚠️ Исключение при запросе {doc_type}: {e}")
             return []
@@ -121,38 +143,36 @@ class IikoService:
         url = "https://api-ru.iiko.services/api/nomenclature/v2/assembly-chart/list"
         headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
         payload = {"dateFrom": today, "dateTo": tomorrow, "includePreparedCharts": True}
-        for attempt in range(5):
-            try:
-                resp = requests.post(url, json=payload, headers=headers, timeout=30)
-                if resp.status_code == 200:
-                    return resp.json()
-                if resp.status_code == 429 and attempt < 4:
-                    print("⚠️ Лимит запросов iiko (429). Повторяем запрос...")
-                    time.sleep(2 ** attempt)
-                    continue
+        try:
+            resp = requests.post(url, json=payload, headers=headers, timeout=30)
+            if resp.status_code == 200:
+                return resp.json()
+            elif resp.status_code == 429:
+                print("⚠️ Лимит запросов iiko (429). Ждем 2 секунды и пробуем еще раз...")
+                time.sleep(2)
+                return self.sync_get_all_tech_cards(token)
+            else:
                 print(f"⚠️ Ошибка массового запроса техкарт: {resp.status_code} - {resp.text}")
                 return None
-            except Exception as e:
-                print(f"⚠️ Исключение при массовом запросе техкарт: {e}")
-                return None
-        return None
+        except Exception as e:
+            print(f"⚠️ Исключение при массовом запросе техкарт: {e}")
+            return None
 
     def sync_get_tech_card_by_id(self, token, product_id):
         url = "https://api-ru.iiko.services/api/nomenclature/v2/assembly-chart/list"
         headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
         payload = {"productId": product_id, "includePreparedCharts": True}
-        for attempt in range(5):
-            try:
-                resp = requests.post(url, json=payload, headers=headers, timeout=15)
-                if resp.status_code == 200:
-                    return resp.json()
-                if resp.status_code == 429 and attempt < 4:
-                    time.sleep(2 ** attempt)
-                    continue
+        try:
+            resp = requests.post(url, json=payload, headers=headers, timeout=15)
+            if resp.status_code == 200:
+                return resp.json()
+            elif resp.status_code == 429:
+                time.sleep(2)
+                return self.sync_get_tech_card_by_id(token, product_id)
+            else:
                 return None
-            except Exception:
-                return None
-        return None
+        except Exception:
+            return None
 
     async def scan_tech_cards_and_nomenclature(self):
         token = await asyncio.to_thread(self.sync_get_token)

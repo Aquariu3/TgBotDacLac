@@ -3,22 +3,24 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.exceptions import TelegramBadRequest
 
-from app.state import inventory, users_db, user_progress, admin_ids, manager_ids, log_service, save_state
+from app.state import inventory, users_db, user_progress, admin_ids, manager_ids, log_service, save_state, ADMIN_ID
 from app.states.states import InventoryStates
-from app.keyboards.admin_kb import get_admin_panel_keyboard, get_users_to_promote_keyboard
+from app.keyboards.admin_kb import get_admin_panel_keyboard, get_users_to_promote_keyboard, get_admin_other_keyboard
 
 router = Router()
 
 @router.callback_query(F.data == "admin_panel")
 async def cb_admin_panel(callback: CallbackQuery):
-    is_super = callback.from_user.id in admin_ids
-    is_manager = callback.from_user.id in manager_ids
-    if not is_super and not is_manager:
+    # Полный доступ только у главного админа и управляющих
+    is_full_access = (callback.from_user.id == ADMIN_ID or callback.from_user.id in manager_ids)
+    is_any_admin = (callback.from_user.id in admin_ids or is_full_access)
+    
+    if not is_any_admin:
         await callback.answer("⛔ У вас нет прав администратора!", show_alert=True)
         return
     
     text = "⚙️ <b>Панель Управляющего</b>\n\nЗдесь вы можете контролировать остатки и смотреть активность сотрудников."
-    kb = get_admin_panel_keyboard(is_super)
+    kb = get_admin_panel_keyboard(is_full_access)
     
     if callback.message.text.startswith(("✅", "💾", "❌", "📝", "🔔")):
         try: await callback.message.delete()
@@ -28,10 +30,24 @@ async def cb_admin_panel(callback: CallbackQuery):
         await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
     await callback.answer()
 
+@router.callback_query(F.data == "admin_other_menu")
+async def cb_admin_other_menu(callback: CallbackQuery):
+    # Доступ только у главного админа и управляющих
+    if callback.from_user.id != ADMIN_ID and callback.from_user.id not in manager_ids:
+        await callback.answer("⛔ У вас нет прав!", show_alert=True)
+        return
+    
+    await callback.message.edit_text(
+        "⚙️ <b>Остальное</b>\n\nВыберите действие:", 
+        reply_markup=get_admin_other_keyboard(), 
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
 @router.callback_query(F.data.in_({"admin_add_admin", "admin_add_manager"}))
 async def cb_admin_add_role(callback: CallbackQuery):
-    if callback.from_user.id not in admin_ids: 
-        await callback.answer("⛔ Только администраторы могут назначать роли!", show_alert=True)
+    if callback.from_user.id != ADMIN_ID and callback.from_user.id not in manager_ids: 
+        await callback.answer("⛔ Только управляющие могут назначать роли!", show_alert=True)
         return
     
     is_admin_role = callback.data == "admin_add_admin"
@@ -55,7 +71,7 @@ async def cb_admin_add_role(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("make_admin_") | F.data.startswith("make_manager_"))
 async def cb_make_role(callback: CallbackQuery):
-    if callback.from_user.id not in admin_ids: return
+    if callback.from_user.id != ADMIN_ID and callback.from_user.id not in manager_ids: return
     
     is_admin_role = callback.data.startswith("make_admin_")
     target_id = int(callback.data.replace("make_admin_" if is_admin_role else "make_manager_", ""))
@@ -75,10 +91,10 @@ async def cb_make_role(callback: CallbackQuery):
         )
         save_state()
         
-        is_super = callback.from_user.id in admin_ids
+        is_full_access = True # Тот, кто назначает, имеет полный доступ
         await callback.message.edit_text(
             f"✅ <b>{target_name}</b> теперь {role_name}!\n\n", 
-            reply_markup=get_admin_panel_keyboard(is_super), 
+            reply_markup=get_admin_panel_keyboard(is_full_access), 
             parse_mode="HTML"
         )
         
@@ -91,18 +107,18 @@ async def cb_make_role(callback: CallbackQuery):
             )
         except Exception: pass
     else:
-        is_super = callback.from_user.id in admin_ids
         await callback.message.edit_text(
             f"{target_name} уже имеет эту роль.", 
-            reply_markup=get_admin_panel_keyboard(is_super)
+            reply_markup=get_admin_panel_keyboard(True)
         )
     await callback.answer()
 
+# Остальные обработчики (admin_users, view_log, admin_notify) 
+# меняем проверку прав на: if callback.from_user.id != ADMIN_ID and callback.from_user.id not in manager_ids: return
+
 @router.callback_query(F.data == "admin_users")
 async def cb_admin_users(callback: CallbackQuery):
-    if callback.from_user.id not in admin_ids and callback.from_user.id not in manager_ids:
-        await callback.answer("⛔ У вас нет прав администратора!", show_alert=True)
-        return
+    if callback.from_user.id != ADMIN_ID and callback.from_user.id not in manager_ids: return
     
     text = "👥 <b>Пользователи и история действий</b>\n\n"
     text += f"<b>Всего пользователей:</b> {len(users_db)}\n"
@@ -136,7 +152,7 @@ async def cb_admin_users(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("view_log_"))
 async def cb_view_log(callback: CallbackQuery):
-    if callback.from_user.id not in admin_ids and callback.from_user.id not in manager_ids: return
+    if callback.from_user.id != ADMIN_ID and callback.from_user.id not in manager_ids: return
     log_id = int(callback.data.replace("view_log_", ""))
     log_entry = next((l for l in log_service.logs if l["id"] == log_id), None)
     if not log_entry or not log_entry["snapshot"]:
@@ -158,7 +174,7 @@ async def cb_view_log(callback: CallbackQuery):
 
 @router.callback_query(F.data == "admin_notify")
 async def cb_admin_notify(callback: CallbackQuery):
-    if callback.from_user.id not in admin_ids and callback.from_user.id not in manager_ids: return
+    if callback.from_user.id != ADMIN_ID and callback.from_user.id not in manager_ids: return
     buttons = [[InlineKeyboardButton(text="📢 Всем сотрудникам", callback_data="notify_target_all")]]
     for uid, uname in users_db.items():
         if uid not in admin_ids:
@@ -170,7 +186,7 @@ async def cb_admin_notify(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("notify_target_"))
 async def cb_notify_target(callback: CallbackQuery, state: FSMContext):
-    if callback.from_user.id not in admin_ids and callback.from_user.id not in manager_ids: return
+    if callback.from_user.id != ADMIN_ID and callback.from_user.id not in manager_ids: return
     target = callback.data.replace("notify_target_", "")
     await state.update_data(notify_target=target, prompt_msg_id=callback.message.message_id)
     await state.set_state(InventoryStates.waiting_for_broadcast_text)
@@ -181,7 +197,7 @@ async def cb_notify_target(callback: CallbackQuery, state: FSMContext):
 
 @router.message(InventoryStates.waiting_for_broadcast_text)
 async def process_broadcast(message: Message, state: FSMContext):
-    if message.from_user.id not in admin_ids and message.from_user.id not in manager_ids: return
+    if message.from_user.id != ADMIN_ID and message.from_user.id not in manager_ids: return
     if not message.text:
         await message.answer("⚠️ Пожалуйста, отправьте текстовое сообщение.")
         return
@@ -228,5 +244,4 @@ async def process_broadcast(message: Message, state: FSMContext):
     if fail_count:
         result += f"\nНе доставлено: <b>{fail_count}</b> (заблокировали бота)."
     
-    is_super = message.from_user.id in admin_ids
-    await message.answer(result, reply_markup=get_admin_panel_keyboard(is_super), parse_mode="HTML")
+    await message.answer(result, reply_markup=get_admin_panel_keyboard(True), parse_mode="HTML")
