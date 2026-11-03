@@ -1,12 +1,13 @@
 import os
 import json
+import re
 from app.config import settings, DATA_DIR
 from app.repositories.inventory_repo import InventoryRepository
 from app.repositories.users_repo import UsersRepository
 from app.repositories.logs_repo import LogsRepository
 from app.repositories.progress_repo import ProgressRepository
 from app.services.iiko_service import IikoService
-from app.services.iiko_async_service import IikoAsyncService  # <-- ДОБАВИТЬ ЭТО
+from app.services.iiko_async_service import IikoAsyncService
 from app.services.log_service import LogService
 from app.services.notification_service import NotificationService
 
@@ -19,7 +20,7 @@ USERS_FILE      = os.path.join(DATA_DIR, "users.json")
 LOGS_FILE       = os.path.join(DATA_DIR, "logs.json")
 PROGRESS_FILE   = os.path.join(DATA_DIR, "progress.json")
 ADMINS_FILE     = os.path.join(DATA_DIR, "admins.json")
-MANAGERS_FILE   = os.path.join(DATA_DIR, "managers.json") # НОВЫЙ ФАЙЛ
+MANAGERS_FILE   = os.path.join(DATA_DIR, "managers.json")
 
 inventory_repo = InventoryRepository(INVENTORY_FILE)
 users_repo = UsersRepository(USERS_FILE)
@@ -27,7 +28,7 @@ logs_repo = LogsRepository(LOGS_FILE)
 progress_repo = ProgressRepository(PROGRESS_FILE)
 
 iiko_service = IikoService(TECH_CARDS_FILE)
-iiko_async_service = IikoAsyncService()  # <-- ДОБАВИТЬ ЭТО
+iiko_async_service = IikoAsyncService()
 log_service = LogService(logs_repo)
 notification_service = NotificationService()
 
@@ -37,7 +38,7 @@ users_db = {}
 user_progress = {}
 last_menu_messages = {}
 admin_ids = {ADMIN_ID}
-manager_ids = set() # НОВЫЙ СПИСОК
+manager_ids = set()
 
 def save_state():
     inventory_repo.save_inventory(inventory)
@@ -59,13 +60,25 @@ def load_state():
     inv = inventory_repo.load_inventory()
     if inv:
         inventory.clear()
-        inventory.update(inv)
-        print(f"✅ Загружено {len(inv)} позиций склада")
+        
+        # --- МАГИЯ ОЧИСТКИ НАЗВАНИЙ ---
+        for k, v in inv.items():
+            # Убираем (шт), (кг), (л/шт) и т.д. из конца названия
+            clean_name = re.sub(r'\s*\((шт|кг|л|л/шт|мл|гр)\)$', '', k, flags=re.IGNORECASE).strip()
+            
+            # Если единицы измерения нет, ставим по умолчанию
+            if "unit" not in v:
+                if "(кг)" in k.lower() or "кг" in k.lower(): v["unit"] = "кг"
+                elif "(л" in k.lower() or " л" in k.lower(): v["unit"] = "л"
+                else: v["unit"] = "шт"
+                
+            inventory[clean_name] = v
+        print(f"✅ Загружено {len(inventory)} позиций склада")
     else:
         inventory.update({
-            "Кофе в зернах (кг)": {"qty": 4.0, "category": "coffee"},
-            "Молоко 3.2% (л/шт)": {"qty": 20.0, "category": "milk"},
-            "Стакан 350 (шт)": {"qty": 150.0, "category": "supplies", "subcategory": "cups"},
+            "Кофе в зернах": {"qty": 4.0, "category": "coffee", "unit": "кг"},
+            "Молоко 3.2%": {"qty": 20.0, "category": "milk", "unit": "л"},
+            "Стакан 350": {"qty": 150.0, "category": "supplies", "subcategory": "cups", "unit": "шт"},
         })
 
     users = users_repo.load_users()

@@ -1,10 +1,8 @@
-import math
-
 from aiogram import Router, F
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 
-from app.state import inventory, users_db, admin_ids, manager_ids, log_service, save_state
+from app.state import inventory, users_db, ADMIN_ID, log_service, save_state, manager_ids, admin_ids
 from app.states.states import InventoryStates
 from app.keyboards.main_kb import get_main_menu
 from app.keyboards.inventory_kb import (
@@ -60,13 +58,17 @@ async def cb_set_item_qty(callback: CallbackQuery, state: FSMContext):
         return
     data_item = inventory[item_name]
     is_dessert = data_item.get("is_dessert")
+    unit = data_item.get("unit", "шт")
+    
     await state.update_data(item_name=item_name, is_dessert=is_dessert, prompt_msg_id=callback.message.message_id)
     await state.set_state(InventoryStates.waiting_for_new_qty)
     keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="edit_categories_menu")]])
+    
     if is_dessert:
-        text = (f"✍️ Позиция: <b>{item_name}</b>\nТекущие значения: всего <b>{data_item['qty']}</b>, витрина <b>{data_item['display_qty']}</b>\n\nВведите <b>общее количество</b> ответным сообщением:")
+        text = (f"✍️ Позиция: <b>{item_name}</b>\nТекущие значения: всего <b>{data_item['qty']}</b> {unit}, витрина <b>{data_item['display_qty']}</b>\n\nВведите <b>общее количество</b> ответным сообщением:")
     else:
-        text = (f"✍️ Позиция: <b>{item_name}</b>\nТекущий остаток: <b>{data_item['qty']}</b>\n\nВведите <b>новое точное число</b> ответным сообщением:")
+        text = (f"✍️ Позиция: <b>{item_name}</b>\nТекущий остаток: <b>{data_item['qty']}</b> {unit}\n\nВведите <b>новое точное число</b> ответным сообщением:")
+    
     await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
     await callback.answer()
 
@@ -77,7 +79,7 @@ async def process_new_qty(message: Message, state: FSMContext):
         return
     try:
         val = float(message.text.replace(",", "."))
-        if not math.isfinite(val) or val < 0: raise ValueError
+        if val < 0: raise ValueError
     except ValueError:
         await message.answer("⚠️ Пожалуйста, введите корректное число (0 или больше):")
         return
@@ -85,28 +87,35 @@ async def process_new_qty(message: Message, state: FSMContext):
     item_name = data.get("item_name")
     is_dessert = data.get("is_dessert")
     prompt_msg_id = data.get("prompt_msg_id")
+    
     try: await message.delete()
     except Exception: pass
+    
     if is_dessert:
         await state.update_data(temp_total_qty=round(val, 2))
         await state.set_state(InventoryStates.waiting_for_new_qty_display)
         keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="edit_categories_menu")]])
-        text = f"✅ Общее количество: <b>{round(val, 2)}</b>\n\nТеперь введите <b>количество на витрине</b>:"
+        unit = inventory[item_name].get("unit", "шт")
+        text = f"✅ Общее количество: <b>{round(val, 2)}</b> {unit}\n\nТеперь введите <b>количество на витрине</b>:"
         if prompt_msg_id:
             try: await message.bot.edit_message_text(chat_id=message.chat.id, message_id=prompt_msg_id, text=text, reply_markup=keyboard, parse_mode="HTML")
             except Exception: await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
         else:
             await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
         return
+    
     await state.clear()
     if not item_name or item_name not in inventory:
-        is_admin = message.from_user.id in admin_ids or message.from_user.id in manager_ids
-        await message.answer("❌ Ошибка: позиция не найдена.", reply_markup=get_main_menu(is_admin))
+        await message.answer("❌ Ошибка: позиция не найдена.", reply_markup=get_main_menu(message.from_user.id == ADMIN_ID))
         return
+    
     inventory[item_name]["qty"] = round(val, 2)
     new_val = inventory[item_name]["qty"]
-    log_service.add_log(message.from_user.id, users_db.get(message.from_user.id, "Неизвестный"), f"точечно изменил(а) «{item_name}» → {new_val}")
+    unit = inventory[item_name].get("unit", "шт")
+    
+    log_service.add_log(message.from_user.id, users_db.get(message.from_user.id, "Неизвестный"), f"точечно изменил(а) «{item_name}» → {new_val} {unit}")
     save_state()
+    
     cat = inventory[item_name]["category"]
     if cat == "coffee": text, kb = "☕ <b>Категория: Кофе</b>", build_coffee_keyboard(inventory)
     elif cat == "milk": text, kb = "🥛 <b>Категория: Молочка</b>", build_milk_keyboard(inventory)
@@ -115,7 +124,8 @@ async def process_new_qty(message: Message, state: FSMContext):
         sub = inventory[item_name].get("subcategory")
         text, kb = f"<b>{'🥤 Стаканы' if sub == 'cups' else '🔘 Крышки'}</b>", build_subcat_keyboard(inventory, sub)
     else: text, kb = "🍰 <b>Десерты и Еда</b>", build_food_keyboard(inventory)
-    text = f"✅ «{item_name}» → <b>{new_val}</b>\n\n{text}"
+    
+    text = f"✅ «{item_name}» → <b>{new_val}</b> {unit}\n\n{text}"
     if prompt_msg_id:
         try: await message.bot.edit_message_text(chat_id=message.chat.id, message_id=prompt_msg_id, text=text, reply_markup=kb, parse_mode="HTML")
         except Exception: await message.answer(text, reply_markup=kb, parse_mode="HTML")
@@ -129,7 +139,7 @@ async def process_new_qty_display(message: Message, state: FSMContext):
         return
     try:
         val = float(message.text.replace(",", "."))
-        if not math.isfinite(val) or val < 0: raise ValueError
+        if val < 0: raise ValueError
     except ValueError:
         await message.answer("⚠️ Пожалуйста, введите корректное число (0 или больше):")
         return
@@ -138,13 +148,18 @@ async def process_new_qty_display(message: Message, state: FSMContext):
     total_qty = data.get("temp_total_qty")
     prompt_msg_id = data.get("prompt_msg_id")
     await state.clear()
+    
     try: await message.delete()
     except Exception: pass
+    
     inventory[item_name]["qty"] = total_qty
     inventory[item_name]["display_qty"] = round(val, 2)
-    log_service.add_log(message.from_user.id, users_db.get(message.from_user.id, "Неизвестный"), f"точечно изменил(а) «{item_name}»: всего {total_qty}, витрина {round(val, 2)}")
+    unit = inventory[item_name].get("unit", "шт")
+    
+    log_service.add_log(message.from_user.id, users_db.get(message.from_user.id, "Неизвестный"), f"точечно изменил(а) «{item_name}»: всего {total_qty} {unit}, витрина {round(val, 2)}")
     save_state()
-    text = f"✅ «{item_name}» обновлено:\n• Всего: <b>{total_qty}</b>\n• Витрина: <b>{round(val, 2)}</b>"
+    
+    text = f"✅ «{item_name}» обновлено:\n• Всего: <b>{total_qty}</b> {unit}\n• Витрина: <b>{round(val, 2)}</b>"
     if prompt_msg_id:
         try: await message.bot.edit_message_text(chat_id=message.chat.id, message_id=prompt_msg_id, text=text, reply_markup=build_food_keyboard(inventory), parse_mode="HTML")
         except Exception: await message.answer(text, reply_markup=build_food_keyboard(inventory), parse_mode="HTML")

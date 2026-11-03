@@ -42,12 +42,14 @@ async def _wizard_show_step(bot: Bot, state: FSMContext, chat_id: int):
     idx = all_keys.index(current_item) + 1
     item_data = inventory[current_item]
     is_dessert = item_data.get("is_dessert")
+    unit = item_data.get("unit", "шт")  # <--- ДОБАВИЛИ ЕДИНИЦУ ИЗМЕРЕНИЯ
+    
     cat_text = f" | Блок: {CATEGORY_NAMES.get(data['active_category'])}" if data.get("active_category") else ""
     if is_dessert:
-        current_val_text = f"всего <i>{item_data['qty']}</i>, витрина <i>{item_data['display_qty']}</i>"
+        current_val_text = f"всего <i>{item_data['qty']}</i> {unit}, витрина <i>{item_data['display_qty']}</i>"
         instruction = "✍️ Введите <b>общее количество</b> ответным сообщением"
     else:
-        current_val_text = f"<i>{item_data['qty']}</i>"
+        current_val_text = f"<i>{item_data['qty']}</i> {unit}"
         instruction = "✍️ Введите <b>новое число</b> ответным сообщением"
     text = (
         f"📋 <b>Сбор остатков ({idx} из {total})</b>{cat_text}\n\n"

@@ -5,13 +5,46 @@ from aiogram.exceptions import TelegramBadRequest
 
 from app.state import inventory, users_db, user_progress, admin_ids, manager_ids, log_service, save_state, ADMIN_ID
 from app.states.states import InventoryStates
-from app.keyboards.admin_kb import get_admin_panel_keyboard, get_users_to_promote_keyboard, get_admin_other_keyboard
+from app.keyboards.admin_kb import (
+    get_admin_panel_keyboard, 
+    get_admin_other_keyboard, 
+    get_role_management_keyboard,
+    get_users_to_promote_keyboard, 
+    get_users_to_demote_keyboard
+)
 
 router = Router()
 
+# --- ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ДЛЯ ОТРИСОВКИ МЕНЮ РОЛЕЙ ---
+async def _render_role_menu(message: Message, role_type: str):
+    is_admin_role = (role_type == "admin")
+    role_name = "Администраторы" if is_admin_role else "Управляющие"
+    target_set = admin_ids if is_admin_role else manager_ids
+    
+    current_users = []
+    for uid in target_set:
+        if uid == ADMIN_ID and is_admin_role:
+            continue # Главного админа не показываем, его нельзя удалить
+        current_users.append((uid, users_db.get(uid, "Сотрудник")))
+
+    text = f"👑 <b>{role_name}</b>\n\n"
+    if not current_users:
+        text += "<i>Список пуст.</i>"
+    else:
+        text += "<b>Текущие:</b>\n"
+        for uid, name in current_users:
+            text += f"• {name}\n"
+            
+    await message.edit_text(
+        text, 
+        reply_markup=get_role_management_keyboard(role_type, current_users), 
+        parse_mode="HTML"
+    )
+
+# --- ГЛАВНОЕ МЕНЮ ---
+
 @router.callback_query(F.data == "admin_panel")
 async def cb_admin_panel(callback: CallbackQuery):
-    # Полный доступ только у главного админа и управляющих
     is_full_access = (callback.from_user.id == ADMIN_ID or callback.from_user.id in manager_ids)
     is_any_admin = (callback.from_user.id in admin_ids or is_full_access)
     
@@ -32,7 +65,6 @@ async def cb_admin_panel(callback: CallbackQuery):
 
 @router.callback_query(F.data == "admin_other_menu")
 async def cb_admin_other_menu(callback: CallbackQuery):
-    # Доступ только у главного админа и управляющих
     if callback.from_user.id != ADMIN_ID and callback.from_user.id not in manager_ids:
         await callback.answer("⛔ У вас нет прав!", show_alert=True)
         return
@@ -44,40 +76,47 @@ async def cb_admin_other_menu(callback: CallbackQuery):
     )
     await callback.answer()
 
-@router.callback_query(F.data.in_({"admin_add_admin", "admin_add_manager"}))
+# --- УПРАВЛЕНИЕ РОЛЯМИ ---
+
+@router.callback_query(F.data.in_({"admin_manage_admins", "admin_manage_managers"}))
+async def cb_manage_roles(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID and callback.from_user.id not in manager_ids: return
+    role_type = "admin" if callback.data == "admin_manage_admins" else "manager"
+    await _render_role_menu(callback.message, role_type)
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("admin_add_role_"))
 async def cb_admin_add_role(callback: CallbackQuery):
-    if callback.from_user.id != ADMIN_ID and callback.from_user.id not in manager_ids: 
-        await callback.answer("⛔ Только управляющие могут назначать роли!", show_alert=True)
-        return
+    if callback.from_user.id != ADMIN_ID and callback.from_user.id not in manager_ids: return
     
-    is_admin_role = callback.data == "admin_add_admin"
-    role_str = "администратором" if is_admin_role else "управляющим"
-    cb_prefix = "make_admin_" if is_admin_role else "make_manager_"
+    role_type = callback.data.replace("admin_add_role_", "")
+    is_admin_role = (role_type == "admin")
     target_list = admin_ids if is_admin_role else manager_ids
 
-    keyboard = get_users_to_promote_keyboard(users_db, target_list, cb_prefix)
+    keyboard = get_users_to_promote_keyboard(users_db, target_list, role_type)
     
-    if len(keyboard.inline_keyboard) == 1:
+    if len(keyboard.inline_keyboard) == 1: # Только кнопка "Назад"
         await callback.answer("Все зарегистрированные пользователи уже имеют эту роль!", show_alert=True)
         return
         
     await callback.message.edit_text(
-        f"👑 <b>Выберите пользователя, чтобы сделать его {role_str}:</b>\n\n"
-        f"<i>Он получит доступ к панели управляющего.</i>", 
+        f"👑 <b>Выберите пользователя, чтобы сделать его {'администратором' if is_admin_role else 'управляющим'}:</b>\n\n", 
         reply_markup=keyboard, 
         parse_mode="HTML"
     )
     await callback.answer()
 
-@router.callback_query(F.data.startswith("make_admin_") | F.data.startswith("make_manager_"))
+@router.callback_query(F.data.startswith("make_"))
 async def cb_make_role(callback: CallbackQuery):
     if callback.from_user.id != ADMIN_ID and callback.from_user.id not in manager_ids: return
     
-    is_admin_role = callback.data.startswith("make_admin_")
-    target_id = int(callback.data.replace("make_admin_" if is_admin_role else "make_manager_", ""))
+    parts = callback.data.split("_")
+    role_type = parts[1] # "admin" или "manager"
+    target_id = int(parts[2])
+    
+    is_admin_role = (role_type == "admin")
     target_name = users_db.get(target_id, "Сотрудник")
     target_list = admin_ids if is_admin_role else manager_ids
-    
     role_name = "Администратор" if is_admin_role else "Управляющий"
 
     if target_id not in target_list:
@@ -91,13 +130,6 @@ async def cb_make_role(callback: CallbackQuery):
         )
         save_state()
         
-        is_full_access = True # Тот, кто назначает, имеет полный доступ
-        await callback.message.edit_text(
-            f"✅ <b>{target_name}</b> теперь {role_name}!\n\n", 
-            reply_markup=get_admin_panel_keyboard(is_full_access), 
-            parse_mode="HTML"
-        )
-        
         try:
             await callback.bot.send_message(
                 target_id, 
@@ -106,15 +138,64 @@ async def cb_make_role(callback: CallbackQuery):
                 parse_mode="HTML"
             )
         except Exception: pass
-    else:
-        await callback.message.edit_text(
-            f"{target_name} уже имеет эту роль.", 
-            reply_markup=get_admin_panel_keyboard(True)
-        )
+    
+    # Отрисовываем меню заново (БЕЗ изменения callback.data)
+    await _render_role_menu(callback.message, role_type)
+    await callback.answer(f"✅ {target_name} теперь {role_name}!")
+
+@router.callback_query(F.data.startswith("admin_del_role_"))
+async def cb_admin_del_role(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID and callback.from_user.id not in manager_ids: return
+    
+    role_type = callback.data.replace("admin_del_role_", "")
+    is_admin_role = (role_type == "admin")
+    target_list = admin_ids if is_admin_role else manager_ids
+
+    keyboard = get_users_to_demote_keyboard(users_db, target_list, role_type)
+    
+    await callback.message.edit_text(
+        f"❌ <b>Выберите, кого лишить прав {'администратора' if is_admin_role else 'управляющего'}:</b>\n\n", 
+        reply_markup=keyboard, 
+        parse_mode="HTML"
+    )
     await callback.answer()
 
-# Остальные обработчики (admin_users, view_log, admin_notify) 
-# меняем проверку прав на: if callback.from_user.id != ADMIN_ID and callback.from_user.id not in manager_ids: return
+@router.callback_query(F.data.startswith("del_"))
+async def cb_do_demote(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID and callback.from_user.id not in manager_ids: return
+    
+    parts = callback.data.split("_")
+    role_type = parts[1]
+    target_id = int(parts[2])
+    
+    is_admin_role = (role_type == "admin")
+    target_list = admin_ids if is_admin_role else manager_ids
+    target_name = users_db.get(target_id, "Сотрудник")
+    role_name = "Администратора" if is_admin_role else "Управляющего"
+
+    if target_id in target_list:
+        target_list.remove(target_id)
+        save_state()
+        
+        log_service.add_log(
+            callback.from_user.id, 
+            users_db.get(callback.from_user.id, "Админ"), 
+            f"лишил(а) {target_name} прав {role_name.lower()}"
+        )
+        save_state()
+        
+        try:
+            await callback.bot.send_message(
+                target_id, 
+                f"⚠️ <b>Ваши права {role_name.lower()}а были отозваны.</b>", 
+                parse_mode="HTML"
+            )
+        except Exception: pass
+    
+    await _render_role_menu(callback.message, role_type)
+    await callback.answer(f"✅ {target_name} больше не {role_name}")
+
+# --- ОСТАЛЬНЫЕ ФУНКЦИИ (ИСТОРИЯ И УВЕДОМЛЕНИЯ) ---
 
 @router.callback_query(F.data == "admin_users")
 async def cb_admin_users(callback: CallbackQuery):

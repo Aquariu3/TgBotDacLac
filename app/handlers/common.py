@@ -3,8 +3,7 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 
-# ВОТ ЗДЕСЬ МЫ ДОБАВИЛИ manager_ids
-from app.state import inventory, users_db, admin_ids, manager_ids, log_service, save_state, last_menu_messages
+from app.state import inventory, users_db, admin_ids, manager_ids, log_service, save_state, last_menu_messages, ADMIN_ID
 from app.states.states import InventoryStates
 from app.texts.messages import get_main_menu_text, build_inventory_text
 from app.keyboards.main_kb import get_main_menu, get_edit_categories_menu
@@ -17,10 +16,24 @@ async def cb_dismiss_msg(callback: CallbackQuery):
     except Exception: pass
     await callback.answer("Уведомление прочитано")
 
+def get_user_role(user_id):
+    is_super = user_id == ADMIN_ID
+    is_manager = user_id in manager_ids
+    is_admin = user_id in admin_ids
+    
+    if is_super: return "👑 <b>Роль: Главный администратор</b>", True
+    if is_manager: return "💼 <b>Роль: Управляющий</b>", True
+    if is_admin: return "🔑 <b>Роль: Администратор</b>", True
+    return "☕ <b>Роль: Бариста</b>", False
+
 @router.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext):
     user_id = message.from_user.id
-    is_admin = user_id in admin_ids or user_id in manager_ids
+    
+    # Удаляем старые меню
+    if user_id in last_menu_messages:
+        try: await message.bot.delete_message(user_id, last_menu_messages[user_id])
+        except Exception: pass
     
     if user_id not in users_db:
         await state.set_state(InventoryStates.waiting_for_reg_name)
@@ -28,9 +41,10 @@ async def cmd_start(message: Message, state: FSMContext):
         return
     await state.clear()
     user_name = users_db[user_id]
-    role_text = "👑 <b>Роль: Управляющий</b>" if is_admin else "☕ <b>Роль: Бариста</b>"
-    text = f"Рад видеть вас снова, <b>{user_name}</b>!\n\n{role_text}\n\n" + get_main_menu_text(inventory, is_admin, user_name)
-    msg = await message.answer(text, reply_markup=get_main_menu(is_admin), parse_mode="HTML")
+    role_text, has_access = get_user_role(user_id)
+    
+    text = f"Рад видеть вас снова, <b>{user_name}</b>!\n\n{role_text}\n\n" + get_main_menu_text(inventory, has_access, user_name)
+    msg = await message.answer(text, reply_markup=get_main_menu(has_access), parse_mode="HTML")
     
     last_menu_messages[user_id] = msg.message_id
     save_state()
@@ -46,15 +60,15 @@ async def process_registration(message: Message, state: FSMContext):
         return
     user_id = message.from_user.id
     users_db[user_id] = full_name
-    is_admin = user_id in admin_ids or user_id in manager_ids
+    
+    role_text, has_access = get_user_role(user_id)
     
     log_service.add_log(user_id, full_name, "зарегистрировался(ась) в боте")
     save_state()
     await state.clear()
     
-    role_text = "👑 <b>Роль: Управляющий</b>" if is_admin else "☕ <b>Роль: Бариста</b>"
-    text = f"✅ Регистрация успешно завершена!\nДобро пожаловать, <b>{full_name}</b>.\n\n{role_text}\n\n" + get_main_menu_text(inventory, is_admin, full_name)
-    msg = await message.answer(text, reply_markup=get_main_menu(is_admin), parse_mode="HTML")
+    text = f"✅ Регистрация успешно завершена!\nДобро пожаловать, <b>{full_name}</b>.\n\n{role_text}\n\n" + get_main_menu_text(inventory, has_access, full_name)
+    msg = await message.answer(text, reply_markup=get_main_menu(has_access), parse_mode="HTML")
     
     last_menu_messages[user_id] = msg.message_id
     save_state()
@@ -62,11 +76,11 @@ async def process_registration(message: Message, state: FSMContext):
 @router.callback_query(F.data == "main_menu")
 async def cb_main_menu(callback: CallbackQuery, state: FSMContext):
     await state.clear()
-    is_admin = callback.from_user.id in admin_ids or callback.from_user.id in manager_ids
-    
     user_name = users_db.get(callback.from_user.id, "Сотрудник")
-    text = get_main_menu_text(inventory, is_admin, user_name)
-    msg = await callback.message.edit_text(text, reply_markup=get_main_menu(is_admin), parse_mode="HTML")
+    role_text, has_access = get_user_role(callback.from_user.id)
+    
+    text = f"Рад видеть вас снова, <b>{user_name}</b>!\n\n{role_text}\n\n" + get_main_menu_text(inventory, has_access, user_name)
+    msg = await callback.message.edit_text(text, reply_markup=get_main_menu(has_access), parse_mode="HTML")
     
     last_menu_messages[callback.from_user.id] = msg.message_id
     save_state()
