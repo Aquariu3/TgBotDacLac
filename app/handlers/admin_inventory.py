@@ -1,3 +1,5 @@
+import math
+
 from aiogram import Router, F
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
@@ -8,15 +10,22 @@ from app.keyboards.admin_kb import get_adm_categories_menu, get_adm_subcats_menu
 
 router = Router()
 
+def _has_inventory_access(user_id: int) -> bool:
+    return user_id in admin_ids or user_id in manager_ids
+
 @router.callback_query(F.data == "admin_edit_items")
 async def cb_admin_edit_items(callback: CallbackQuery):
-    if callback.from_user.id not in admin_ids and callback.from_user.id not in manager_ids:
+    if not _has_inventory_access(callback.from_user.id):
+        await callback.answer("⛔ У вас нет прав администратора!", show_alert=True)
         return
     await callback.message.edit_text("✏️ <b>Изменить позиции</b>\nВыберите категорию:", reply_markup=get_adm_categories_menu())
     await callback.answer()
 
 @router.callback_query(F.data.startswith("adm_cat_"))
 async def cb_adm_cat(callback: CallbackQuery):
+    if not _has_inventory_access(callback.from_user.id):
+        await callback.answer("⛔ У вас нет прав администратора!", show_alert=True)
+        return
     cat = callback.data.replace("adm_cat_", "")
     if cat == "supplies":
         await callback.message.edit_text("📦 <b>Расходники</b>\nВыберите подкатегорию:", reply_markup=get_adm_subcats_menu())
@@ -32,6 +41,9 @@ async def cb_adm_cat(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("adm_subcat_"))
 async def cb_adm_subcat(callback: CallbackQuery):
+    if not _has_inventory_access(callback.from_user.id):
+        await callback.answer("⛔ У вас нет прав администратора!", show_alert=True)
+        return
     subcat = callback.data.replace("adm_subcat_", "")
     buttons = []
     for name, data in inventory.items():
@@ -45,6 +57,9 @@ async def cb_adm_subcat(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("adm_item_"))
 async def cb_adm_item_actions(callback: CallbackQuery):
+    if not _has_inventory_access(callback.from_user.id):
+        await callback.answer("⛔ У вас нет прав администратора!", show_alert=True)
+        return
     item_name = callback.data.replace("adm_item_", "")
     if item_name not in inventory:
         await callback.answer("Позиция не найдена", show_alert=True)
@@ -64,6 +79,9 @@ async def cb_adm_item_actions(callback: CallbackQuery):
 # --- УДАЛЕНИЕ ---
 @router.callback_query(F.data.startswith("adm_delete_"))
 async def cb_adm_delete(callback: CallbackQuery):
+    if not _has_inventory_access(callback.from_user.id):
+        await callback.answer("⛔ У вас нет прав администратора!", show_alert=True)
+        return
     item_name = callback.data.replace("adm_delete_", "")
     if item_name in inventory:
         del inventory[item_name]
@@ -74,6 +92,9 @@ async def cb_adm_delete(callback: CallbackQuery):
 # --- ПЕРЕИМЕНОВАНИЕ ---
 @router.callback_query(F.data.startswith("adm_rename_"))
 async def cb_adm_rename(callback: CallbackQuery, state: FSMContext):
+    if not _has_inventory_access(callback.from_user.id):
+        await callback.answer("⛔ У вас нет прав администратора!", show_alert=True)
+        return
     item_name = callback.data.replace("adm_rename_", "")
     await state.update_data(old_name=item_name)
     await state.set_state(AdminEditStates.waiting_for_new_name)
@@ -82,7 +103,16 @@ async def cb_adm_rename(callback: CallbackQuery, state: FSMContext):
 
 @router.message(AdminEditStates.waiting_for_new_name)
 async def process_adm_rename(message: Message, state: FSMContext):
+    if not _has_inventory_access(message.from_user.id):
+        await message.answer("⛔ У вас нет прав администратора!")
+        return
+    if not message.text:
+        await message.answer("⚠️ Отправьте текстовое название.")
+        return
     new_name = message.text.strip()
+    if not new_name:
+        await message.answer("⚠️ Название не должно быть пустым.")
+        return
     if new_name in inventory:
         await message.answer("❌ Позиция с таким названием уже существует! Введите другое:")
         return
@@ -97,6 +127,9 @@ async def process_adm_rename(message: Message, state: FSMContext):
 # --- ДОБАВЛЕНИЕ ---
 @router.callback_query(F.data.startswith("adm_add_"))
 async def cb_adm_add(callback: CallbackQuery, state: FSMContext):
+    if not _has_inventory_access(callback.from_user.id):
+        await callback.answer("⛔ У вас нет прав администратора!", show_alert=True)
+        return
     parts = callback.data.split("_")
     cat = parts[2]
     subcat = parts[3] if len(parts) > 3 and parts[3] != "None" else None
@@ -108,7 +141,16 @@ async def cb_adm_add(callback: CallbackQuery, state: FSMContext):
 
 @router.message(AdminEditStates.waiting_for_new_item_name)
 async def process_adm_add_name(message: Message, state: FSMContext):
+    if not _has_inventory_access(message.from_user.id):
+        await message.answer("⛔ У вас нет прав администратора!")
+        return
+    if not message.text:
+        await message.answer("⚠️ Отправьте текстовое название.")
+        return
     new_name = message.text.strip()
+    if not new_name:
+        await message.answer("⚠️ Название не должно быть пустым.")
+        return
     if new_name in inventory:
         await message.answer("❌ Позиция с таким названием уже существует! Введите другое:")
         return
@@ -118,9 +160,15 @@ async def process_adm_add_name(message: Message, state: FSMContext):
 
 @router.message(AdminEditStates.waiting_for_new_item_qty)
 async def process_adm_add_qty(message: Message, state: FSMContext):
+    if not _has_inventory_access(message.from_user.id):
+        await message.answer("⛔ У вас нет прав администратора!")
+        return
+    if not message.text:
+        await message.answer("⚠️ Отправьте число.")
+        return
     try:
         qty = float(message.text.replace(",", "."))
-        if qty < 0: raise ValueError
+        if not math.isfinite(qty) or qty < 0: raise ValueError
     except ValueError:
         await message.answer("⚠️ Введите корректное число (0 или больше):")
         return
@@ -146,9 +194,15 @@ async def process_adm_add_qty(message: Message, state: FSMContext):
 
 @router.message(AdminEditStates.waiting_for_new_item_display)
 async def process_adm_add_display(message: Message, state: FSMContext):
+    if not _has_inventory_access(message.from_user.id):
+        await message.answer("⛔ У вас нет прав администратора!")
+        return
+    if not message.text:
+        await message.answer("⚠️ Отправьте число.")
+        return
     try:
         val = float(message.text.replace(",", "."))
-        if val < 0: raise ValueError
+        if not math.isfinite(val) or val < 0: raise ValueError
     except ValueError:
         await message.answer("⚠️ Введите корректное число (0 или больше):")
         return

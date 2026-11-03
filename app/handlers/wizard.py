@@ -1,11 +1,12 @@
 import copy
 import logging
+import math
 from aiogram import Router, F, Bot
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.exceptions import TelegramBadRequest
 
-from app.state import inventory, users_db, user_progress, ADMIN_ID, log_service, notification_service, save_state
+from app.state import inventory, users_db, user_progress, ADMIN_ID, admin_ids, manager_ids, log_service, notification_service, save_state
 from app.states.states import InventoryStates
 from app.domain.constants import CATEGORY_NAMES
 from app.texts.messages import get_main_menu_text, build_inventory_text
@@ -95,7 +96,7 @@ async def _wizard_finish(bot: Bot, state: FSMContext, chat_id: int):
         try: await bot.delete_message(chat_id, msg_id)
         except Exception: pass
     user_name = users_db.get(user_id, "Сотрудник")
-    is_admin = user_id == ADMIN_ID
+    is_admin = user_id in admin_ids or user_id in manager_ids
     log_service.add_log(user_id, user_name, "полностью отправил(а) остатки", snapshot=collected)
     save_state()
     if admin_msg_id:
@@ -259,7 +260,7 @@ async def wizard_save_exit(callback: CallbackQuery, state: FSMContext):
         try: await callback.bot.delete_message(ADMIN_ID, admin_msg_id)
         except Exception: pass
     await notification_service.update_admin_status(callback.bot, ADMIN_ID, user_id, users_db.get(user_id, "Сотрудник"), "Сохранил(а) черновик")
-    is_admin = user_id == ADMIN_ID
+    is_admin = user_id in admin_ids or user_id in manager_ids
     user_name = users_db.get(user_id, "Сотрудник")
     text = f"💾 <b>Прогресс сохранен!</b>\n\nВведенные цифры записаны в базу. Вы можете вернуться и завершить сбор в любое время.\n\n" + get_main_menu_text(inventory, is_admin, user_name)
     await callback.message.answer(text, reply_markup=get_main_menu(is_admin), parse_mode="HTML")
@@ -363,7 +364,7 @@ async def wizard_cancel(callback: CallbackQuery, state: FSMContext):
         try: await callback.bot.delete_message(ADMIN_ID, admin_msg_id)
         except Exception: pass
     await notification_service.update_admin_status(callback.bot, ADMIN_ID, user_id, users_db.get(user_id, "Сотрудник"), action="cancel")
-    is_admin = user_id == ADMIN_ID
+    is_admin = user_id in admin_ids or user_id in manager_ids
     user_name = users_db.get(user_id, "Сотрудник")
     text = f"❌ Сбор остатков отменён (незавершенные данные удалены).\n\n" + get_main_menu_text(inventory, is_admin, user_name)
     await callback.message.answer(text, reply_markup=get_main_menu(is_admin), parse_mode="HTML")
@@ -376,7 +377,7 @@ async def process_wizard_qty(message: Message, state: FSMContext):
         return
     try:
         val = float(message.text.replace(",", "."))
-        if val < 0: raise ValueError
+        if not math.isfinite(val) or val < 0: raise ValueError
     except ValueError:
         await message.answer("⚠️ Пожалуйста, введите корректное число (0 или больше):")
         return
@@ -410,7 +411,7 @@ async def process_wizard_display_qty(message: Message, state: FSMContext):
         return
     try:
         val = float(message.text.replace(",", "."))
-        if val < 0: raise ValueError
+        if not math.isfinite(val) or val < 0: raise ValueError
     except ValueError:
         await message.answer("⚠️ Пожалуйста, введите корректное число (0 или больше):")
         return

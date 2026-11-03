@@ -1,8 +1,10 @@
+import math
+
 from aiogram import Router, F
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 
-from app.state import inventory, users_db, ADMIN_ID, log_service, save_state
+from app.state import inventory, users_db, admin_ids, manager_ids, log_service, save_state
 from app.states.states import InventoryStates
 from app.keyboards.main_kb import get_main_menu
 from app.keyboards.inventory_kb import (
@@ -75,7 +77,7 @@ async def process_new_qty(message: Message, state: FSMContext):
         return
     try:
         val = float(message.text.replace(",", "."))
-        if val < 0: raise ValueError
+        if not math.isfinite(val) or val < 0: raise ValueError
     except ValueError:
         await message.answer("⚠️ Пожалуйста, введите корректное число (0 или больше):")
         return
@@ -98,7 +100,8 @@ async def process_new_qty(message: Message, state: FSMContext):
         return
     await state.clear()
     if not item_name or item_name not in inventory:
-        await message.answer("❌ Ошибка: позиция не найдена.", reply_markup=get_main_menu(message.from_user.id == ADMIN_ID))
+        is_admin = message.from_user.id in admin_ids or message.from_user.id in manager_ids
+        await message.answer("❌ Ошибка: позиция не найдена.", reply_markup=get_main_menu(is_admin))
         return
     inventory[item_name]["qty"] = round(val, 2)
     new_val = inventory[item_name]["qty"]
@@ -126,7 +129,7 @@ async def process_new_qty_display(message: Message, state: FSMContext):
         return
     try:
         val = float(message.text.replace(",", "."))
-        if val < 0: raise ValueError
+        if not math.isfinite(val) or val < 0: raise ValueError
     except ValueError:
         await message.answer("⚠️ Пожалуйста, введите корректное число (0 или больше):")
         return

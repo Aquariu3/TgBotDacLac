@@ -5,7 +5,7 @@ from app.config import settings
 from app.handlers import setup_routers
 
 # Добавляем last_menu_messages в импорт
-from app.state import users_db, user_progress, inventory, ADMIN_ID, save_state, notification_service, last_menu_messages
+from app.state import users_db, user_progress, inventory, ADMIN_ID, admin_ids, manager_ids, save_state, notification_service, last_menu_messages
 from app.texts.messages import get_main_menu_text
 from app.keyboards.main_kb import get_main_menu
 
@@ -21,7 +21,7 @@ async def on_startup(bot: Bot):
                 pass # Если сообщение старое (>48ч) или уже удалено
         
         # 2. Отправляем новое меню
-        is_admin = user_id == ADMIN_ID
+        is_admin = user_id in admin_ids or user_id in manager_ids
         text = f"🟢 <b>Бот снова в сети!</b>\n\n" + get_main_menu_text(inventory, is_admin, user_name)
         
         try:

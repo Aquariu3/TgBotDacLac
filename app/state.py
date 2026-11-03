@@ -6,6 +6,7 @@ from app.repositories.users_repo import UsersRepository
 from app.repositories.logs_repo import LogsRepository
 from app.repositories.progress_repo import ProgressRepository
 from app.services.iiko_service import IikoService
+from app.services.iiko_async_service import IikoAsyncService  # <-- ДОБАВИТЬ ЭТО
 from app.services.log_service import LogService
 from app.services.notification_service import NotificationService
 
@@ -26,6 +27,7 @@ logs_repo = LogsRepository(LOGS_FILE)
 progress_repo = ProgressRepository(PROGRESS_FILE)
 
 iiko_service = IikoService(TECH_CARDS_FILE)
+iiko_async_service = IikoAsyncService()  # <-- ДОБАВИТЬ ЭТО
 log_service = LogService(logs_repo)
 notification_service = NotificationService()
 
