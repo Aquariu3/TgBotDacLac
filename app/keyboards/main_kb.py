@@ -10,6 +10,8 @@ def get_main_menu(has_access: bool) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="📊 Посмотреть все остатки", callback_data="view_all")],
     ]
     if has_access: 
+        keyboard.append([InlineKeyboardButton(text="📉 Остатки с учетом продаж", callback_data="estimated_stock")])
+        keyboard.append([InlineKeyboardButton(text="📊 Продажи", callback_data="sales_menu")]) # <-- НОВАЯ КНОПКА
         keyboard.append([InlineKeyboardButton(text="⚙️ Панель администратора", callback_data="admin_panel")])
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 

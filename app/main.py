@@ -15,37 +15,71 @@ from app.state import (
 # Импорты для меню
 from app.texts.messages import get_main_menu_text
 from app.keyboards.main_kb import get_main_menu
+from app.handlers.common import get_user_role  # Берем функцию определения роли
 
 async def on_startup(bot: Bot):
     logging.info("Бот запускается. Загружаем данные...")
-    # П.10: Загружаем данные, когда логирование уже настроено
     load_state()
     
-    logging.info("Рассылаем меню пользователям...")
-    for user_id, user_name in list(users_db.items()):
-        # 1. Удаляем предыдущее сообщение с меню, если оно было
-        if user_id in last_menu_messages:
-            try:
-                await bot.delete_message(user_id, last_menu_messages[user_id])
-            except Exception:
-                pass # Если сообщение старое (>48ч) или уже удалено
-        
-        # 2. Отправляем новое меню
-        is_admin = user_id in admin_ids or user_id in manager_ids
-        text = f"🟢 <b>Бот снова в сети!</b>\n\n" + get_main_menu_text(inventory, is_admin, user_name)
-        
-        try:
-            msg = await bot.send_message(
-                user_id, 
-                text, 
-                reply_markup=get_main_menu(is_admin), 
-                parse_mode="HTML"
-            )
-            last_menu_messages[user_id] = msg.message_id
-            await asyncio.sleep(0.05)
-        except Exception as e:
-            logging.warning(f"Не удалось отправить стартовое сообщение {user_id}: {e}")
+    logging.info("Обновляем меню у пользователей...")
     
+    for user_id, user_name in list(users_db.items()):
+        # Определяем роль пользователя
+        is_super = (user_id == ADMIN_ID)
+        is_manager = (user_id in manager_ids) or is_super
+        is_admin = (user_id in admin_ids) or is_manager
+        
+        role_text, has_access = get_user_role(is_super, is_manager, is_admin)
+        
+        # Формируем красивый текст (как по команде /start)
+        text = f"Рад видеть вас снова, <b>{user_name}</b>!\n\n{role_text}\n\n" + get_main_menu_text(inventory, has_access, user_name)
+        
+        # Если это админ/управляющий — добавляем пометку о запуске бота
+        if has_access:
+            text = "🟢 <b>Бот снова в сети!</b>\n\n" + text
+
+        if has_access:
+            # Админам отправляем новое сообщение (предварительно удалив старое)
+            if user_id in last_menu_messages:
+                try: await bot.delete_message(user_id, last_menu_messages[user_id])
+                except Exception: pass
+                
+            try:
+                msg = await bot.send_message(user_id, text, reply_markup=get_main_menu(has_access), parse_mode="HTML")
+                last_menu_messages[user_id] = msg.message_id
+                await asyncio.sleep(0.05)
+            except Exception as e:
+                logging.warning(f"Не удалось отправить сообщение админу {user_id}: {e}")
+        else:
+            # Обычным пользователям РЕДАКТИРУЕМ старое сообщение "Бот не активен" обратно в меню
+            if user_id in last_menu_messages:
+                msg_id = last_menu_messages[user_id]
+                try:
+                    await bot.edit_message_text(
+                        chat_id=user_id,
+                        message_id=msg_id,
+                        text=text,
+                        reply_markup=get_main_menu(has_access),
+                        parse_mode="HTML"
+                    )
+                    await asyncio.sleep(0.05)
+                except Exception:
+                    # Если сообщение было удалено пользователем или ему больше 48 часов
+                    try:
+                        msg = await bot.send_message(user_id, text, reply_markup=get_main_menu(has_access), parse_mode="HTML")
+                        last_menu_messages[user_id] = msg.message_id
+                        await asyncio.sleep(0.05)
+                    except Exception as e:
+                        logging.warning(f"Не удалось отправить меню пользователю {user_id}: {e}")
+            else:
+                # Если сообщения не было в базе
+                try:
+                    msg = await bot.send_message(user_id, text, reply_markup=get_main_menu(has_access), parse_mode="HTML")
+                    last_menu_messages[user_id] = msg.message_id
+                    await asyncio.sleep(0.05)
+                except Exception as e:
+                    logging.warning(f"Не удалось отправить меню пользователю {user_id}: {e}")
+
     save_state()
     logging.info("Бот готов к работе!")
 
@@ -67,16 +101,36 @@ async def on_shutdown(bot: Bot):
             except Exception: pass
         del notification_service.status_messages[user_id]
 
-    # 3. Удаляем старые меню и оповещаем ТОЛЬКО АДМИНОВ (П.9: защита от таймаута)
+    # 3. Обрабатываем меню пользователей
     for user_id in list(users_db.keys()):
+        is_admin_user = user_id in admin_ids or user_id in manager_ids or user_id == ADMIN_ID
+        
         if user_id in last_menu_messages:
-            try:
-                await bot.delete_message(user_id, last_menu_messages[user_id])
-            except Exception:
-                pass
+            msg_id = last_menu_messages[user_id]
+            
+            if not is_admin_user:
+                # Обычным пользователям РЕДАКТИРУЕМ сообщение и убираем кнопки
+                try:
+                    await bot.edit_message_text(
+                        chat_id=user_id,
+                        message_id=msg_id,
+                        text="🔴 <b>Бот сейчас не активен.</b>\n\nПожалуйста, вернитесь позже. Все ваши данные сохранены.",
+                        reply_markup=None, # Убираем кнопки
+                        parse_mode="HTML"
+                    )
+                except Exception as e:
+                    logging.warning(f"Не удалось изменить меню на 'неактивно' для {user_id}: {e}")
+                    try: await bot.delete_message(user_id, msg_id)
+                    except Exception: pass
+                    last_menu_messages.pop(user_id, None)
+            else:
+                # Админам просто удаляем старое меню
+                try: await bot.delete_message(user_id, msg_id)
+                except Exception: pass
+                last_menu_messages.pop(user_id, None)
                 
-        # Отправляем сообщение о неактивности только тем, кому это важно
-        if user_id in admin_ids or user_id in manager_ids:
+        # Отправляем уведомление о неактивности ТОЛЬКО админам
+        if is_admin_user:
             try:
                 msg = await bot.send_message(
                     user_id, 
@@ -107,7 +161,6 @@ def create_dispatcher() -> Dispatcher:
     return dp
 
 async def main() -> None:
-    # П.22: Убран лишний отступ
     bot = create_bot()
     dp = create_dispatcher()
     try:

@@ -5,7 +5,8 @@ def get_admin_panel_keyboard(is_full_access: bool) -> InlineKeyboardMarkup:
     if is_full_access:
         kb.extend([
             [InlineKeyboardButton(text="📊 Остатки по iiko", callback_data="iiko_view")],
-            [InlineKeyboardButton(text="🔄 Движения за сегодня", callback_data="iiko_movements")],
+            [InlineKeyboardButton(text="🍽 Текущие техкарты", callback_data="admin_tech_cards")], # <-- ВОТ КНОПКА
+            [InlineKeyboardButton(text="🔗 Сопоставление с iiko", callback_data="admin_mapping")],
             [InlineKeyboardButton(text="👥 Пользователи и история", callback_data="admin_users")],
             [InlineKeyboardButton(text="📢 Отправить уведомление", callback_data="admin_notify")],
             [InlineKeyboardButton(text="⚙️ Остальное", callback_data="admin_other_menu")]

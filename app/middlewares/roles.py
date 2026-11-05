@@ -29,11 +29,19 @@ class RoleMiddleware(BaseMiddleware):
             elif isinstance(event, Message):
                 current_msg_id = event.message_id
 
-            if user.id in last_menu_messages and last_menu_messages[user.id] != current_msg_id:
+            # Не удаляем меню, если пользователь нажал "Хорошо" на уведомлении
+            is_notification = isinstance(event, CallbackQuery) and event.data == "dismiss_msg"
+
+            if not is_notification and user.id in last_menu_messages and last_menu_messages[user.id] != current_msg_id:
                 try:
                     await event.bot.delete_message(user.id, last_menu_messages[user.id])
                 except Exception as e:
                     logging.warning(f"Middleware: не удалось удалить старое меню {user.id}: {e}")
                 last_menu_messages.pop(user.id, None)
-            
+                
+            # ВАЖНО: Запоминаем ID сообщения, с которым сейчас работает пользователь
+            # Делаем это только для кнопок, чтобы случайно не удалить меню при вводе текста
+            if isinstance(event, CallbackQuery) and current_msg_id:
+                last_menu_messages[user.id] = current_msg_id
+
         return await handler(event, data)

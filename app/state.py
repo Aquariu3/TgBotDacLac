@@ -25,6 +25,7 @@ LOGS_FILE       = os.path.join(DATA_DIR, "logs.json")
 PROGRESS_FILE   = os.path.join(DATA_DIR, "progress.json")
 ADMINS_FILE     = os.path.join(DATA_DIR, "admins.json")
 MANAGERS_FILE   = os.path.join(DATA_DIR, "managers.json")
+IIKO_MAPPINGS_FILE = os.path.join(DATA_DIR, "iiko_mappings.json") # НОВОЕ
 
 inventory_repo = InventoryRepository(INVENTORY_FILE)
 users_repo = UsersRepository(USERS_FILE)
@@ -34,6 +35,7 @@ progress_repo = ProgressRepository(PROGRESS_FILE)
 last_messages_repo = JsonRepository(os.path.join(DATA_DIR, "last_messages.json"))
 admins_repo = JsonRepository(ADMINS_FILE)
 managers_repo = JsonRepository(MANAGERS_FILE)
+iiko_mappings_repo = JsonRepository(IIKO_MAPPINGS_FILE) # НОВОЕ
 
 _save_state_lock = threading.Lock()
 
@@ -49,6 +51,7 @@ user_progress = {}
 last_menu_messages = {}
 admin_ids = {ADMIN_ID}
 manager_ids = set()
+iiko_mappings = {} # НОВОЕ
 
 def _save_state_sync():
     """Синхронная запись на диск (выполняется в фоновом потоке)."""
@@ -59,6 +62,7 @@ def _save_state_sync():
         last_messages_repo.save(last_menu_messages)
         admins_repo.save(list(admin_ids))
         managers_repo.save(list(manager_ids))
+        iiko_mappings_repo.save(iiko_mappings) # НОВОЕ
 
 def save_state():
     """Неблокирующее сохранение в фоновом потоке."""
@@ -69,7 +73,7 @@ def save_state():
         _save_state_sync()
 
 def load_state():
-    global inventory, users_db, user_progress, last_menu_messages, admin_ids, manager_ids
+    global inventory, users_db, user_progress, last_menu_messages, admin_ids, manager_ids, iiko_mappings
 
     # 1. Загрузка склада
     inv = inventory_repo.load_inventory()
@@ -78,7 +82,6 @@ def load_state():
         for k, v in inv.items():
             clean_name = clean_item_name(k)
             
-            # П.15: Расширенная логика определения единиц измерения
             if "unit" not in v:
                 name_lower = k.lower()
                 if "кг" in name_lower: v["unit"] = "кг"
@@ -120,7 +123,7 @@ def load_state():
                 last_menu_messages.update({int(k): v for k, v in json.load(f).items()})
         except Exception: pass
         
-    # 5. Загрузка ролей (П.11: защита от строк)
+    # 5. Загрузка ролей
     if os.path.exists(ADMINS_FILE):
         try:
             with open(ADMINS_FILE, "r", encoding="utf-8") as f:
@@ -136,3 +139,10 @@ def load_state():
                     try: manager_ids.add(int(m_id))
                     except (ValueError, TypeError): pass
         except Exception: pass
+
+    # 6. Загрузка связей с iiko (НОВОЕ)
+    maps = iiko_mappings_repo.load(default={})
+    if maps:
+        iiko_mappings.clear()
+        iiko_mappings.update(maps)
+        print(f"✅ Загружено {len(maps)} связей с iiko")

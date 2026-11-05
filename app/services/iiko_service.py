@@ -20,6 +20,7 @@ class IikoService:
         self.iiko_cache_time = None
         self.iiko_products_cache = {}
         self.iiko_products_cache_time = None
+        self.groups_cache = {}
         self.IIKO_CACHE_TTL = 300
         self.PRODUCTS_CACHE_TTL = 3600
         self.load_tech_cards()
@@ -69,7 +70,7 @@ class IikoService:
 
     def sync_get_products(self, token):
         now = datetime.now()
-        if self.iiko_products_cache and self.iiko_products_cache_time and (now - self.iiko_products_cache_time).total_seconds() < self.PRODUCTS_CACHE_TTL:
+        if self.iiko_products_cache:
             return self.iiko_products_cache
         url = "https://api-ru.iiko.services/api/nomenclature/v2/product/list"
         headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
@@ -104,41 +105,57 @@ class IikoService:
 
     def sync_get_groups(self, token):
         """Возвращает словарь {group_id: group_name}"""
+        # Если кэш уже есть - отдаем его
+        if self.groups_cache:
+            return self.groups_cache
+
         url = "https://api-ru.iiko.services/api/nomenclature/v2/group/list"
         headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
         groups_map = {}
         offset = 0
         limit = 1000
-        while True:
-            payload = {"filters": [], "limit": limit, "offset": offset}
+        
+        for attempt in range(3): # Пробуем 3 раза
             try:
+                payload = {"filters": [], "limit": limit, "offset": offset}
                 resp = requests.post(url, json=payload, headers=headers, timeout=60)
                 if resp.status_code != 200:
-                    logging.warning(f"⚠️ Ошибка загрузки групп: {resp.status_code} - {resp.text}")
+                    logging.warning(f"⚠️ Ошибка загрузки групп: {resp.status_code}")
                     break
                 data = resp.json()
+                
+                items = data.get("groups", [])
+                if not items:
+                    break
+                for g in items:
+                    gid = g.get("groupId") or g.get("id")
+                    gname = g.get("name")
+                    if gid and gname:
+                        groups_map[gid] = gname
+                if len(items) < limit:
+                    break
+                offset += limit
             except Exception as e:
-                logging.error(f"Ошибка при запросе или парсинге групп: {e}")
-                break
-            
-            items = data.get("groups", [])
-            if not items:
-                break
-            for g in items:
-                gid = g.get("groupId") or g.get("id")
-                gname = g.get("name")
-                if gid and gname:
-                    groups_map[gid] = gname
-            if len(items) < limit:
-                break
-            offset += limit
+                logging.error(f"Попытка {attempt+1} загрузки групп не удалась: {e}")
+                if attempt == 2: # Если 3-я попытка провалилась
+                    logging.warning("Возвращаем пустой список групп (iiko не ответила).")
+                    return {} 
+        
+        # Сохраняем в кэш, если что-то загрузили
+        if groups_map:
+            self.groups_cache = groups_map
+        
         return groups_map
 
-    def sync_get_documents(self, token, doc_type):
-        today = datetime.now().strftime("%Y-%m-%d")
-        tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+    def sync_get_documents(self, token, doc_type, from_date=None, to_date=None):
+        if not from_date:
+            from_date = datetime.now().strftime("%Y-%m-%d")
+        if not to_date:
+            # Если дата одна, запрашиваем этот день + 1 день, чтобы захватить весь день
+            to_date = (datetime.strptime(from_date, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+            
         url = f"https://api-ru.iiko.services/api/inventory/v1/{doc_type}/list"
-        payload = {"organizationId": settings.IIKO_ORG_ID, "from": today, "to": tomorrow, "returnFullDetails": True}
+        payload = {"organizationId": settings.IIKO_ORG_ID, "from": from_date, "to": to_date, "returnFullDetails": True}
         headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
         try:
             resp = requests.post(url, json=payload, headers=headers, timeout=60)
@@ -149,7 +166,7 @@ class IikoService:
         except Exception as e:
             logging.error(f"⚠️ Исключение при запросе {doc_type}: {e}")
             return []
-
+        
     def sync_get_all_tech_cards(self, token):
         today = datetime.now().strftime("%Y-%m-%d")
         tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
@@ -302,3 +319,58 @@ class IikoService:
             self.iiko_stock_cache = result
             self.iiko_cache_time = now
             return result
+    def sync_get_menu_product_ids(self, token):
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        
+        try:
+            # 1. Получаем список внешних меню
+            url_menu = "https://api-ru.iiko.services/api/2/menu"
+            resp = requests.post(url_menu, headers=headers, timeout=30)
+            if resp.status_code != 200:
+                logging.warning(f"Ошибка загрузки списка меню: {resp.status_code}")
+                return set()
+            
+            menus_data = resp.json()
+            external_menus = menus_data.get("externalMenus", [])
+            if not external_menus:
+                logging.warning("В iiko не настроено ни одного внешнего меню.")
+                return set()
+            
+            # Берем первое доступное меню
+            external_menu_id = external_menus[0].get("id")
+            if not external_menu_id:
+                return set()
+                
+            # 2. Запрашиваем само меню для нашей точки
+            url_by_id = "https://api-ru.iiko.services/api/2/menu/by_id"
+            payload = {
+                "externalMenuId": external_menu_id,
+                "organizationIds": [settings.IIKO_ORG_ID],
+                "version": 3
+            }
+            resp2 = requests.post(url_by_id, json=payload, headers=headers, timeout=60)
+            if resp2.status_code != 200:
+                logging.warning(f"Ошибка загрузки деталей меню: {resp2.status_code}")
+                return set()
+                
+            menu_details = resp2.json()
+            product_ids = set()
+            
+            # Парсим структуру (поддерживаем V3 и V4)
+            item_groups = menu_details.get("itemGroups") or menu_details.get("itemCategories") or []
+            for group in item_groups:
+                for item in group.get("items", []):
+                    if "id" in item:
+                        product_ids.add(item["id"])
+                    elif "itemId" in item:
+                        product_ids.add(item["itemId"])
+                    
+                    # Если у товара есть размеры
+                    for size in item.get("itemSizes", []):
+                        if "id" in size:
+                            product_ids.add(size["id"])
+                            
+            return product_ids
+        except Exception as e:
+            logging.error(f"Ошибка при получении меню точки: {e}")
+            return set()

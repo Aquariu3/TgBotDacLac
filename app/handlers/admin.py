@@ -1,6 +1,7 @@
 from aiogram import Router, F
 from aiogram.fsm.context import FSMContext
 import asyncio
+import math
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.exceptions import TelegramBadRequest
 import logging
@@ -16,6 +17,26 @@ from app.keyboards.admin_kb import (
 )
 
 router = Router()
+
+# --- Группировка логов по категориям ---
+LOG_CATEGORIES = {
+    "add": ("📂 Добавление", ["добавил"]),
+    "del": ("🗑 Удаление", ["удалил"]),
+    "rename": ("✏️ Переименование", ["переименовал"]),
+    "edit": ("📝 Точечное изменение", ["точечно изменил"]),
+    "wizard": ("📋 Сбор остатков", ["составление", "черновик", "отправил", "сбросил", "стёр", "продолжил"]),
+    "role": ("👑 Права", ["назначил", "лишил"]),
+    "other": ("🗂 Другое", [])
+}
+
+def get_log_category(action: str) -> str:
+    action_lower = action.lower()
+    for cat_key, (_, keywords) in LOG_CATEGORIES.items():
+        if cat_key == "other": continue
+        if any(kw in action_lower for kw in keywords):
+            return cat_key
+    return "other"
+# ---------------------------------------
 
 async def _render_role_menu(message: Message, role_type: str):
     is_admin_role = (role_type == "admin")
@@ -239,12 +260,11 @@ async def cb_admin_users(callback: CallbackQuery, is_manager: bool):
     if not log_service.logs:
         text += "• <i>Пока нет действий</i>\n"
     else:
-        for log in reversed(log_service.logs[-10:]):
+        for log in reversed(log_service.logs[-5:]): # Показываем только 5 последних глобальных действий
             text += f"• [{log['time']}] <b>{log['user_name']}</b> — {log['action']}\n"
 
-    # Группируем действия по пользователям для кнопок
     buttons = []
-    recent_logs = list(reversed(log_service.logs[-20:])) # берем последние 20 действий для кнопок
+    recent_logs = list(reversed(log_service.logs[-20:]))
     user_actions = {}
     for log in recent_logs:
         uid = log.get("user_id")
@@ -265,7 +285,8 @@ async def cb_admin_users(callback: CallbackQuery, is_manager: bool):
     try:
         await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
     except TelegramBadRequest as e:
-        if "message is not modified" in str(e): pass
+        if "message is not modified" not in str(e):
+            await callback.message.answer(text, reply_markup=keyboard, parse_mode="HTML")
     await callback.answer()
 
 @router.callback_query(F.data.startswith("history_user_"))
@@ -277,7 +298,6 @@ async def cb_history_user(callback: CallbackQuery, is_manager: bool):
         
     uid = int(callback.data.replace("history_user_", ""))
     
-    # Берем все логи этого пользователя
     user_logs = [l for l in log_service.logs if l.get("user_id") == uid]
     
     if not user_logs:
@@ -285,16 +305,21 @@ async def cb_history_user(callback: CallbackQuery, is_manager: bool):
         return
         
     user_name = user_logs[-1].get("user_name", "Сотрудник")
-    text = f"👤 <b>История действий: {user_name}</b>\n\n"
+    text = f"👤 <b>История действий: {user_name}</b>\n\nВыберите категорию действий для просмотра:"
     
+    # Группируем логи по категориям
+    grouped = {cat: [] for cat in LOG_CATEGORIES.keys()}
+    for log in user_logs:
+        cat = get_log_category(log["action"])
+        grouped[cat].append(log)
+
     buttons = []
-    for log in reversed(user_logs):
-        text += f"• [{log['time']}] {log['action']}\n"
-        if log.get("snapshot") is not None:
-            label = "черновик" if "черновик" in log["action"] else "отправил" if "отправил" in log["action"] else "данные"
+    for cat_key, (cat_name, _) in LOG_CATEGORIES.items():
+        count = len(grouped[cat_key])
+        if count > 0:
             buttons.append([InlineKeyboardButton(
-                text=f"👁 Посмотреть {label} ({log['time']})", 
-                callback_data=f"view_log_{log['id']}_{uid}"
+                text=f"{cat_name} ({count})", 
+                callback_data=f"hist_cat_{uid}_{cat_key}_0"
             )])
             
     buttons.append([InlineKeyboardButton(text="⬅️ Назад к пользователям", callback_data="admin_users")])
@@ -305,12 +330,72 @@ async def cb_history_user(callback: CallbackQuery, is_manager: bool):
     except TelegramBadRequest as e:
         if "message is not modified" not in str(e):
             await callback.message.answer(text, reply_markup=keyboard, parse_mode="HTML")
-    except Exception as e:
-        logging.warning(f"Не удалось обновить историю: {e}")
-        await callback.message.answer(text, reply_markup=keyboard, parse_mode="HTML")
     await callback.answer()
-    
-    await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+
+@router.callback_query(F.data.startswith("hist_cat_"))
+async def cb_hist_cat(callback: CallbackQuery, is_manager: bool):
+    if not is_manager:
+        await callback.message.delete()
+        await callback.answer()
+        return
+
+    parts = callback.data.split("_")
+    uid = int(parts[2])
+    cat_key = parts[3]
+    page = int(parts[4])
+
+    user_logs = [l for l in log_service.logs if l.get("user_id") == uid]
+    cat_logs = [l for l in user_logs if get_log_category(l["action"]) == cat_key]
+    cat_logs = list(reversed(cat_logs)) # Новые сверху
+
+    page_size = 5
+    start = page * page_size
+    end = start + page_size
+    paginated = cat_logs[start:end]
+    total_pages = math.ceil(len(cat_logs) / page_size)
+
+    cat_name = LOG_CATEGORIES[cat_key][0]
+    user_name = cat_logs[0].get("user_name", "Сотрудник") if cat_logs else users_db.get(uid, "Сотрудник")
+
+    text = f"👤 <b>История: {user_name}</b>\n📂 <b>{cat_name}</b> (стр. {page + 1} из {total_pages})\n\n"
+
+    buttons = []
+    for log in paginated:
+        text += f"• [{log['time']}] {log['action']}\n"
+        if log.get("snapshot") is not None:
+            # Берем сам текст действия для кнопки
+            action_label = log["action"]
+            
+            # Делаем первую букву заглавной для красоты
+            if action_label:
+                action_label = action_label[0].upper() + action_label[1:]
+            
+            # Если название слишком длинное, аккуратно обрезаем
+            if len(action_label) > 35:
+                action_label = action_label[:32] + "..."
+                
+            buttons.append([InlineKeyboardButton(
+                text=f"👁 {action_label}", 
+                callback_data=f"view_log_{log['id']}_{uid}_{cat_key}_{page}"
+            )])
+
+    # Кнопки пагинации
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"hist_cat_{uid}_{cat_key}_{page - 1}"))
+    if end < len(cat_logs):
+        nav_row.append(InlineKeyboardButton(text="Далее ➡️", callback_data=f"hist_cat_{uid}_{cat_key}_{page + 1}"))
+    if nav_row:
+        buttons.append(nav_row)
+
+    buttons.append([InlineKeyboardButton(text="⬅️ К категориям", callback_data=f"history_user_{uid}")])
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramBadRequest as e:
+        if "message is not modified" not in str(e):
+            await callback.message.answer(text, reply_markup=keyboard, parse_mode="HTML")
     await callback.answer()
 
 @router.callback_query(F.data.startswith("view_log_"))
@@ -322,7 +407,9 @@ async def cb_view_log(callback: CallbackQuery, is_manager: bool):
         
     parts = callback.data.split("_")
     log_id = int(parts[2])
-    user_id_back = int(parts[3]) if len(parts) > 3 else None # ID пользователя для кнопки "Назад"
+    user_id_back = int(parts[3]) if len(parts) > 3 else None
+    back_cat = parts[4] if len(parts) > 4 else None
+    back_page = int(parts[5]) if len(parts) > 5 else 0
 
     log_entry = next((l for l in log_service.logs if l["id"] == log_id), None)
     if not log_entry or not log_entry["snapshot"]:
@@ -335,7 +422,7 @@ async def cb_view_log(callback: CallbackQuery, is_manager: bool):
     text += f"Время: {log_entry['time']}\n\n"
     text += "<b>Введенные данные:</b>\n"
     for name, val in log_entry["snapshot"].items():
-        if name == "undo_type": continue # скрываем служебную инфу
+        if name == "undo_type": continue 
         if isinstance(val, dict) and "qty" in val:
             text += f"• {name}: всего <b>{val.get('qty')}</b>, витрина <b>{val.get('display_qty')}</b>\n"
         elif isinstance(val, dict):
@@ -347,9 +434,15 @@ async def cb_view_log(callback: CallbackQuery, is_manager: bool):
     if isinstance(log_entry.get("snapshot"), dict) and log_entry["snapshot"].get("undo_type"):
         buttons.append([InlineKeyboardButton(text="↩️ Отменить это действие", callback_data=f"undo_{log_id}")])
     
-    back_cb = f"history_user_{user_id_back}" if user_id_back else "admin_users"
+    # Правильная кнопка "Назад" в зависимости от того, откуда пришли
+    if back_cat:
+        back_cb = f"hist_cat_{user_id_back}_{back_cat}_{back_page}"
+    elif user_id_back:
+        back_cb = f"history_user_{user_id_back}"
+    else:
+        back_cb = "admin_users"
+        
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=back_cb)])
-    
     keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
 
     try:
@@ -357,12 +450,6 @@ async def cb_view_log(callback: CallbackQuery, is_manager: bool):
     except TelegramBadRequest as e:
         if "message is not modified" not in str(e):
             await callback.message.answer(text, reply_markup=keyboard, parse_mode="HTML")
-    except Exception as e:
-        logging.warning(f"Не удалось обновить историю: {e}")
-        await callback.message.answer(text, reply_markup=keyboard, parse_mode="HTML")
-    await callback.answer()
-
-    await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
     await callback.answer()
 
 @router.callback_query(F.data.startswith("undo_"))
@@ -416,12 +503,11 @@ async def cb_undo_action(callback: CallbackQuery, is_manager: bool):
         
         save_state()
         
-        # Защищаем от повторного отката, удаляя метку undo_type из лога
         snap["undo_type"] = None
         await asyncio.to_thread(log_service.repo.save_logs, list(log_service.logs))
         
         await callback.answer("✅ Действие успешно отменено!", show_alert=True)
-        await cb_admin_users(callback, is_manager=is_manager) # Возвращаем в историю
+        await cb_admin_users(callback, is_manager=is_manager)
         
     except Exception as e:
         await callback.answer(f"❌ Ошибка при откате: {e}", show_alert=True)

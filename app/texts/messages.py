@@ -42,4 +42,20 @@ def build_inventory_text(inventory: dict, header: str) -> str:
                 lines.append(f"• {name}: всего <b>{data.get('qty', 0)}</b> {unit}, витрина <b>{data.get('display_qty', 0)}</b>")
             else: 
                 lines.append(f"• {name}: <b>{data.get('qty', 0)}</b> {unit}")
-    return "\n".join(lines)
+                
+    full_text = "\n".join(lines)
+    
+    # Защита от ошибки "Message is too long" (лимит Telegram - 4096 символов)
+    MAX_LEN = 3900  # Оставляем запас для HTML-тегов
+    if len(full_text) > MAX_LEN:
+        truncated = []
+        current_len = 0
+        for line in lines:
+            # +1 за символ переноса строки
+            if current_len + len(line) + 1 > MAX_LEN:
+                break
+            truncated.append(line)
+            current_len += len(line) + 1
+        full_text = "\n".join(truncated) + "\n\n<i>(Слишком много позиций, список обрезан)</i>"
+        
+    return full_text

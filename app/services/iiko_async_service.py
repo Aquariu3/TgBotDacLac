@@ -21,7 +21,7 @@ class IikoAsyncService:
 
     async def get_nomenclature(self) -> Dict[str, Dict[str, Any]]:
         now = datetime.now()
-        if self._products_cache and self._products_cache_time and (now - self._products_cache_time) < self._cache_ttl:
+        if self._products_cache:
             return self._products_cache
 
         result = {}
@@ -46,9 +46,11 @@ class IikoAsyncService:
                         unit = p_dict['measureUnit'].get('name', 'шт') if isinstance(p_dict['measureUnit'], dict) else str(p_dict['measureUnit'])
                     
                     p_type = p_dict.get('type', 'UNKNOWN')
+                    is_deleted = p_dict.get('isDeleted', False)
+                    p_group_id = p_dict.get('parentGroupId') # <-- Берем ID папки (группы)
 
                     if p_id:
-                        result[p_id] = {"name": p_name, "unit": unit, "type": p_type}
+                        result[p_id] = {"name": p_name, "unit": unit, "type": p_type, "isDeleted": is_deleted, "group_id": p_group_id}
 
                 if len(products) < limit:
                     break
@@ -126,3 +128,28 @@ class IikoAsyncService:
                 updated_count += 1
                 
         return updated_count
+    async def get_menu_product_ids(self) -> set[str]:
+        """Возвращает set ID продуктов, которые входят в меню точки."""
+        async with self._get_client() as iiko:
+            try:
+                menu = await iiko.menu(organization_ids=[settings.IIKO_ORG_ID])
+                # Выводим структуру ответа в консоль для отладки
+                logging.info(f"Структура меню из iiko: {menu.model_dump() if hasattr(menu, 'model_dump') else menu}")
+                
+                product_ids = set()
+                # Пытаемся найти продукты в разных возможных местах структуры
+                if hasattr(menu, 'menus'):
+                    for m in menu.menus:
+                        for product in m.products:
+                            product_ids.add(product.id)
+                elif hasattr(menu, 'products'):
+                    for product in menu.products:
+                        product_ids.add(product.id)
+                return product_ids
+            except Exception as e:
+                logging.error(f"Ошибка при получении меню точки: {e}")
+                return set()
+    def clear_cache(self):
+        """Очищает кэш номенклатуры, чтобы принудительно запросить свежие данные."""
+        self._products_cache = None
+        self._products_cache_time = None
