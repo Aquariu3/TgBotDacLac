@@ -1,0 +1,5 @@
+aiogram==3.x.x
+pydantic-settings
+iikocloudapi
+requests
+pytest

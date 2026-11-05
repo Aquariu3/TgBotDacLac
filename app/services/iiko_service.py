@@ -8,10 +8,11 @@ import requests
 from iikocloudapi import AppAuth, IikoCloud
 from app.domain.constants import SUPPLY_KEYWORDS, DESSERT_KEYWORDS, BAR_KEYWORDS, KITCHEN_KEYWORDS
 from app.config import settings
-
+from app.repositories.base import JsonRepository
 class IikoService:
     def __init__(self, tech_cards_file: str):
         self.tech_cards_file = tech_cards_file
+        self._tech_cards_repo = JsonRepository(tech_cards_file)
         self.cached_tech_card_ids = set()
         self.cached_tech_cards_map = {}
         self.iiko_stock_cache = []
@@ -23,29 +24,23 @@ class IikoService:
         self.load_tech_cards()
 
     def load_tech_cards(self):
-        if os.path.exists(self.tech_cards_file):
-            try:
-                with open(self.tech_cards_file, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    if isinstance(data, dict):
-                        self.cached_tech_cards_map = data
-                        all_ing_ids = set()
-                        for dish_id, ings in self.cached_tech_cards_map.items():
-                            for ing_id in ings.keys():
-                                all_ing_ids.add(ing_id)
-                        self.cached_tech_card_ids = all_ing_ids
-                    elif isinstance(data, list):
-                        self.cached_tech_card_ids = set(data)
-                        self.cached_tech_cards_map = {}
-            except Exception as e:
-                print(f"Ошибка загрузки техкарт: {e}")
+        data = self._tech_cards_repo.load(default=None)
+        if data is None:
+            return
+
+        if isinstance(data, dict):
+            self.cached_tech_cards_map = data
+            all_ing_ids = set()
+            for dish_id, ings in self.cached_tech_cards_map.items():
+                for ing_id in ings.keys():
+                    all_ing_ids.add(ing_id)
+            self.cached_tech_card_ids = all_ing_ids
+        elif isinstance(data, list):
+            self.cached_tech_card_ids = set(data)
+            self.cached_tech_cards_map = {}
 
     def save_tech_cards(self):
-        try:
-            with open(self.tech_cards_file, 'w', encoding='utf-8') as f:
-                json.dump(self.cached_tech_cards_map, f)
-        except Exception as e:
-            logging.error(f"Ошибка сохранения техкарт: {e}")
+        self._tech_cards_repo.save(self.cached_tech_cards_map)
 
     def classify_iiko_item(self, name: str) -> str:
         name_lower = name.lower()

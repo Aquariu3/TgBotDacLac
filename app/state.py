@@ -1,8 +1,11 @@
 import os
 import json
-import re
+import threading
+
 from app.config import settings, DATA_DIR
+from app.repositories.base import JsonRepository
 from app.repositories.inventory_repo import InventoryRepository
+from app.text_utils import clean_item_name
 from app.repositories.users_repo import UsersRepository
 from app.repositories.logs_repo import LogsRepository
 from app.repositories.progress_repo import ProgressRepository
@@ -27,6 +30,14 @@ users_repo = UsersRepository(USERS_FILE)
 logs_repo = LogsRepository(LOGS_FILE)
 progress_repo = ProgressRepository(PROGRESS_FILE)
 
+# Репозитории для трёх «прямых» JSON-файлов — теперь тоже с атомарной записью
+last_messages_repo = JsonRepository(os.path.join(DATA_DIR, "last_messages.json"))
+admins_repo = JsonRepository(ADMINS_FILE)
+managers_repo = JsonRepository(MANAGERS_FILE)
+
+# Блокировка, чтобы save_state() целиком писал «снимок» всех файлов
+_save_state_lock = threading.Lock()
+
 iiko_service = IikoService(TECH_CARDS_FILE)
 iiko_async_service = IikoAsyncService()
 log_service = LogService(logs_repo)
@@ -41,18 +52,18 @@ admin_ids = {ADMIN_ID}
 manager_ids = set()
 
 def save_state():
-    inventory_repo.save_inventory(inventory)
-    users_repo.save_users(users_db)
-    progress_repo.save_progress(user_progress)
-    
-    with open(os.path.join(DATA_DIR, "last_messages.json"), "w", encoding="utf-8") as f:
-        json.dump(last_menu_messages, f)
-        
-    with open(ADMINS_FILE, "w", encoding="utf-8") as f:
-        json.dump(list(admin_ids), f)
-        
-    with open(MANAGERS_FILE, "w", encoding="utf-8") as f:
-        json.dump(list(manager_ids), f)
+    """Сохраняет всё состояние в JSON-файлы атомарно.
+
+    Блокировка нужна, чтобы два одновременных вызова не перемешали записи.
+    Внутри каждого save() ещё есть своя per-file блокировка — это второй уровень защиты.
+    """
+    with _save_state_lock:
+        inventory_repo.save_inventory(inventory)
+        users_repo.save_users(users_db)
+        progress_repo.save_progress(user_progress)
+        last_messages_repo.save(last_menu_messages)
+        admins_repo.save(list(admin_ids))
+        managers_repo.save(list(manager_ids))
 
 def load_state():
     global inventory, users_db, user_progress, last_menu_messages, admin_ids, manager_ids
@@ -61,10 +72,10 @@ def load_state():
     if inv:
         inventory.clear()
         
-        # --- МАГИЯ ОЧИСТКИ НАЗВАНИЙ ---
+                # --- МАГИЯ ОЧИСТКИ НАЗВАНИЙ ---
         for k, v in inv.items():
             # Убираем (шт), (кг), (л/шт) и т.д. из конца названия
-            clean_name = re.sub(r'\s*\((шт|кг|л|л/шт|мл|гр)\)$', '', k, flags=re.IGNORECASE).strip()
+            clean_name = clean_item_name(k)
             
             # Если единицы измерения нет, ставим по умолчанию
             if "unit" not in v:
