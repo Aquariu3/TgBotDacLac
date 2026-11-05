@@ -10,6 +10,7 @@ from app.keyboards.inventory_kb import (
     build_coffee_keyboard, build_milk_keyboard, build_drinks_keyboard, 
     build_supplies_keyboard, build_subcat_keyboard, build_food_keyboard
 )
+from app.text_utils import find_item_by_hash
 
 router = Router()
 
@@ -53,9 +54,10 @@ async def cb_food(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.startswith("set_"))
 async def cb_set_item_qty(callback: CallbackQuery, state: FSMContext):
-    item_name = callback.data[len("set_"):]
-    if item_name not in inventory:
-        await callback.answer("❌ Позиция не найдена!", show_alert=True)
+    item_hash = callback.data[len("set_"):]
+    item_name = find_item_by_hash(inventory, item_hash)
+    if not item_name or item_name not in inventory:
+        await callback.answer("❌ Позиция не найдена (возможно, удалена). Обновите меню.", show_alert=True)
         return
     data_item = inventory[item_name]
     is_dessert = data_item.get("is_dessert")
@@ -66,9 +68,9 @@ async def cb_set_item_qty(callback: CallbackQuery, state: FSMContext):
     keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="edit_categories_menu")]])
     
     if is_dessert:
-        text = (f"✍️ Позиция: <b>{item_name}</b>\nТекущие значения: всего <b>{data_item['qty']}</b> {unit}, витрина <b>{data_item['display_qty']}</b>\n\nВведите <b>общее количество</b> ответным сообщением:")
+        text = (f"✍️ Позиция: <b>{item_name}</b>\nТекущие значения: всего <b>{data_item.get('qty', 0)}</b> {unit}, витрина <b>{data_item.get('display_qty', 0)}</b>\n\nВведите <b>общее количество</b> ответным сообщением:")
     else:
-        text = (f"✍️ Позиция: <b>{item_name}</b>\nТекущий остаток: <b>{data_item['qty']}</b> {unit}\n\nВведите <b>новое точное число</b> ответным сообщением:")
+        text = (f"✍️ Позиция: <b>{item_name}</b>\nТекущий остаток: <b>{data_item.get('qty', 0)}</b> {unit}\n\nВведите <b>новое точное число</b> ответным сообщением:")
     
     await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
     await callback.answer()
@@ -130,10 +132,9 @@ async def process_new_qty(message: Message, state: FSMContext):
     
     text = f"✅ «{item_name}» → <b>{new_val}</b> {unit}\n\n{text}"
     if prompt_msg_id:
-        try: await message.bot.edit_message_text(chat_id=message.chat.id, message_id=prompt_msg_id, text=text, reply_markup=kb, parse_mode="HTML")
-        except Exception: await message.answer(text, reply_markup=kb, parse_mode="HTML")
-    else:
-        await message.answer(text, reply_markup=kb, parse_mode="HTML")
+        try: await message.bot.delete_message(chat_id=message.chat.id, message_id=prompt_msg_id)
+        except Exception: pass
+    await message.answer(text, reply_markup=kb, parse_mode="HTML")
 
 @router.message(InventoryStates.waiting_for_new_qty_display)
 async def process_new_qty_display(message: Message, state: FSMContext):
@@ -166,7 +167,6 @@ async def process_new_qty_display(message: Message, state: FSMContext):
     
     text = f"✅ «{item_name}» обновлено:\n• Всего: <b>{total_qty}</b> {unit}\n• Витрина: <b>{round(val, 2)}</b>"
     if prompt_msg_id:
-        try: await message.bot.edit_message_text(chat_id=message.chat.id, message_id=prompt_msg_id, text=text, reply_markup=build_food_keyboard(inventory), parse_mode="HTML")
-        except Exception: await message.answer(text, reply_markup=build_food_keyboard(inventory), parse_mode="HTML")
-    else:
-        await message.answer(text, reply_markup=build_food_keyboard(inventory), parse_mode="HTML")
+        try: await message.bot.delete_message(chat_id=message.chat.id, message_id=prompt_msg_id)
+        except Exception: pass
+    await message.answer(text, reply_markup=build_food_keyboard(inventory), parse_mode="HTML")

@@ -1,7 +1,9 @@
+import logging
 from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.exceptions import TelegramBadRequest
 
 from app.state import inventory, users_db, admin_ids, manager_ids, log_service, save_state, last_menu_messages, ADMIN_ID
 from app.states.states import InventoryStates
@@ -13,7 +15,7 @@ router = Router()
 @router.callback_query(F.data == "dismiss_msg")
 async def cb_dismiss_msg(callback: CallbackQuery):
     try: await callback.message.delete()
-    except Exception: pass
+    except Exception as e: logging.warning(f"Не удалось удалить уведомление: {e}")
     await callback.answer("Уведомление прочитано")
 
 def get_user_role(is_super: bool, is_manager: bool, is_admin: bool):
@@ -26,14 +28,12 @@ def get_user_role(is_super: bool, is_manager: bool, is_admin: bool):
 async def cmd_start(message: Message, state: FSMContext, is_super: bool, is_manager: bool, is_admin: bool):
     user_id = message.from_user.id
     
-    # Удаляем команду /start из чата
     try: await message.delete()
-    except Exception: pass
+    except Exception as e: logging.warning(f"Не удалось удалить /start: {e}")
     
-    # Удаляем старое меню
     if user_id in last_menu_messages:
         try: await message.bot.delete_message(user_id, last_menu_messages[user_id])
-        except Exception: pass
+        except Exception as e: logging.warning(f"Не удалось удалить старое меню при /start: {e}")
     
     if user_id not in users_db:
         await state.set_state(InventoryStates.waiting_for_reg_name)
@@ -66,9 +66,8 @@ async def process_registration(message: Message, state: FSMContext, is_super: bo
     log_service.add_log(user_id, full_name, "зарегистрировался(ась) в боте")
     await state.clear()
     
-    # Удаляем сообщение пользователя с его именем
     try: await message.delete()
-    except Exception: pass
+    except Exception as e: logging.warning(f"Не удалось удалить сообщение с именем: {e}")
     
     text = f"✅ Регистрация успешно завершена!\nДобро пожаловать, <b>{full_name}</b>.\n\n{role_text}\n\n" + get_main_menu_text(inventory, has_access, full_name)
     msg = await message.answer(text, reply_markup=get_main_menu(has_access), parse_mode="HTML")
@@ -83,7 +82,17 @@ async def cb_main_menu(callback: CallbackQuery, state: FSMContext, is_super: boo
     role_text, has_access = get_user_role(is_super, is_manager, is_admin)
     
     text = f"Рад видеть вас снова, <b>{user_name}</b>!\n\n{role_text}\n\n" + get_main_menu_text(inventory, has_access, user_name)
-    msg = await callback.message.edit_text(text, reply_markup=get_main_menu(has_access), parse_mode="HTML")
+    
+    try:
+        msg = await callback.message.edit_text(text, reply_markup=get_main_menu(has_access), parse_mode="HTML")
+    except TelegramBadRequest as e:
+        if "message is not modified" in str(e):
+            pass
+        else:
+            msg = await callback.message.answer(text, reply_markup=get_main_menu(has_access), parse_mode="HTML")
+    except Exception as e:
+        logging.warning(f"Не удалось отредактировать главное меню, отправляем новое: {e}")
+        msg = await callback.message.answer(text, reply_markup=get_main_menu(has_access), parse_mode="HTML")
     
     last_menu_messages[callback.from_user.id] = msg.message_id
     save_state()
@@ -92,12 +101,26 @@ async def cb_main_menu(callback: CallbackQuery, state: FSMContext, is_super: boo
 @router.callback_query(F.data == "edit_categories_menu")
 async def cb_edit_categories(callback: CallbackQuery, state: FSMContext):
     await state.clear()
-    await callback.message.edit_text("✏️ <b>Редактирование по категориям</b>\nВыберите нужный раздел:", reply_markup=get_edit_categories_menu(), parse_mode="HTML")
+    try:
+        await callback.message.edit_text("✏️ <b>Редактирование по категориям</b>\nВыберите нужный раздел:", reply_markup=get_edit_categories_menu(), parse_mode="HTML")
+    except TelegramBadRequest as e:
+        if "message is not modified" not in str(e):
+            await callback.message.answer("✏️ <b>Редактирование по категориям</b>\nВыберите нужный раздел:", reply_markup=get_edit_categories_menu(), parse_mode="HTML")
+    except Exception as e:
+        logging.warning(f"Не удалось открыть меню редактирования: {e}")
+        await callback.message.answer("✏️ <b>Редактирование по категориям</b>\nВыберите нужный раздел:", reply_markup=get_edit_categories_menu(), parse_mode="HTML")
     await callback.answer()
 
 @router.callback_query(F.data == "view_all")
 async def cb_view_all(callback: CallbackQuery):
     text = build_inventory_text(inventory, "📊 <b>Текущие остатки на складе:</b>\n")
     keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ В главное меню", callback_data="main_menu")]])
-    await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramBadRequest as e:
+        if "message is not modified" not in str(e):
+            await callback.message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+    except Exception as e:
+        logging.warning(f"Не удалось показать все остатки: {e}")
+        await callback.message.answer(text, reply_markup=keyboard, parse_mode="HTML")
     await callback.answer()

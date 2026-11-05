@@ -55,15 +55,14 @@ async def _wizard_show_step(bot: Bot, state: FSMContext, chat_id: int):
     is_dessert = item_data.get("is_dessert")
     unit = item_data.get("unit", "шт")
 
-    # П.11 (доп.): .get(None) вернёт None — используем только если ключ есть
     cat_name = CATEGORY_NAMES.get(data.get("active_category")) if data.get("active_category") else None
     cat_text = f" | Блок: {cat_name}" if cat_name else ""
 
     if is_dessert:
-        current_val_text = f"всего <i>{item_data['qty']}</i> {unit}, витрина <i>{item_data.get('display_qty', 0)}</i>"
+        current_val_text = f"всего <i>{item_data.get('qty', 0)}</i> {unit}, витрина <i>{item_data.get('display_qty', 0)}</i>"
         instruction = "✍️ Введите <b>общее количество</b> ответным сообщением"
     else:
-        current_val_text = f"<i>{item_data['qty']}</i> {unit}"
+        current_val_text = f"<i>{item_data.get('qty', 0)}</i> {unit}"
         instruction = "✍️ Введите <b>новое число</b> ответным сообщением"
     text = (
         f"📋 <b>Сбор остатков ({idx} из {total})</b>{cat_text}\n\n"
@@ -88,7 +87,9 @@ async def _wizard_show_step(bot: Bot, state: FSMContext, chat_id: int):
             return
         except TelegramBadRequest as e:
             if "message is not modified" in str(e): return
-        except Exception: pass
+            logging.warning(f"Не удалось отредактировать шаг мастера: {e}")
+        except Exception as e:
+            logging.warning(f"Ошибка при редактировании шага мастера: {e}")
     sent = await bot.send_message(chat_id=chat_id, text=text, reply_markup=keyboard, parse_mode="HTML")
     await state.update_data(wizard_message_id=sent.message_id)
 
@@ -104,20 +105,20 @@ async def _wizard_finish(bot: Bot, state: FSMContext, chat_id: int):
     for item_name, val in collected.items():
         if item_name in inventory:
             if isinstance(val, dict):
-                inventory[item_name]["qty"] = val.get("qty", inventory[item_name]["qty"])
+                inventory[item_name]["qty"] = val.get("qty", inventory[item_name].get("qty", 0))
                 inventory[item_name]["display_qty"] = val.get("display_qty", inventory[item_name].get("display_qty", 0))
             else:
                 inventory[item_name]["qty"] = val
     if msg_id:
         try: await bot.delete_message(chat_id, msg_id)
-        except Exception: pass
+        except Exception as e: logging.warning(f"Не удалось удалить сообщение мастера: {e}")
     user_name = users_db.get(user_id, "Сотрудник")
     is_admin = user_id in admin_ids or user_id in manager_ids
     log_service.add_log(user_id, user_name, "полностью отправил(а) остатки", snapshot=collected)
     save_state()
     if admin_msg_id:
         try: await bot.delete_message(ADMIN_ID, admin_msg_id)
-        except Exception: pass
+        except Exception as e: logging.warning(f"Не удалось удалить сообщение прогресса у админа: {e}")
     await notification_service.update_admin_status(bot, ADMIN_ID, user_id, user_name, action="final")
     report_text = build_inventory_text(inventory, f"📦 <b>Итоговый отчет от: {user_name}</b>\n")
     try:
@@ -144,7 +145,7 @@ async def start_inventory_wizard(callback: CallbackQuery, state: FSMContext):
         await callback.answer("❌ Список позиций пуст!", show_alert=True)
         return
     try: await callback.message.delete()
-    except Exception: pass
+    except Exception as e: logging.warning(f"Не удалось удалить сообщение при старте мастера: {e}")
     data = {
         "collected_data": {}, "history": [], "active_category": None,
         "current_item": None, "wizard_message_id": None, "wizard_user_id": user_id, "admin_msg_id": None
@@ -167,7 +168,7 @@ async def wizard_resume(callback: CallbackQuery, state: FSMContext):
         await state.update_data(saved_data)
         await state.set_state(InventoryStates.wizard_qty)
         try: await callback.message.delete()
-        except Exception: pass
+        except Exception as e: logging.warning(f"Не удалось удалить сообщение при возобновлении мастера: {e}")
         log_service.add_log(user_id, users_db.get(user_id, "Неизвестный"), "продолжил(а) сбор остатков из черновика")
         save_state()
         await notification_service.update_admin_status(callback.bot, ADMIN_ID, user_id, users_db.get(user_id, "Сотрудник"), "Продолжил(а) делать остатки")
@@ -190,10 +191,10 @@ async def wizard_restart(callback: CallbackQuery, state: FSMContext):
 async def wizard_restart_save(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
     if user_id in user_progress:
-        user_progress.pop(user_id) # Просто удаляем черновик, ничего не откатываем
+        user_progress.pop(user_id)
         
     try: await callback.message.delete()
-    except Exception: pass
+    except Exception as e: logging.warning(f"Не удалось удалить сообщение при рестарте мастера: {e}")
     
     new_data = {
         "collected_data": {}, "history": [], "active_category": None,
@@ -216,7 +217,7 @@ async def wizard_restart_drop(callback: CallbackQuery, state: FSMContext):
         user_progress.pop(user_id)
         
     try: await callback.message.delete()
-    except Exception: pass
+    except Exception as e: logging.warning(f"Не удалось удалить сообщение при рестарте мастера: {e}")
     
     new_data = {
         "collected_data": {}, "history": [], "active_category": None,
@@ -240,20 +241,19 @@ async def wizard_save_exit(callback: CallbackQuery, state: FSMContext):
     msg_id = data.get("wizard_message_id")
     admin_msg_id = data.get("admin_msg_id")
     
-    # Данные НЕ применяем к inventory. Просто сохраняем как черновик.
     user_progress[user_id] = data
     await state.clear()
     
     if msg_id:
         try: await callback.bot.delete_message(callback.message.chat.id, msg_id)
-        except Exception: pass
+        except Exception as e: logging.warning(f"Не удалось удалить сообщение мастера при сохранении: {e}")
         
     log_service.add_log(user_id, users_db.get(user_id, "Неизвестный"), "сохранил(а) черновик остатков", snapshot=collected)
     save_state()
     
     if admin_msg_id:
         try: await callback.bot.delete_message(ADMIN_ID, admin_msg_id)
-        except Exception: pass
+        except Exception as e: logging.warning(f"Не удалось удалить сообщение прогресса при сохранении: {e}")
         
     await notification_service.update_admin_status(callback.bot, ADMIN_ID, user_id, users_db.get(user_id, "Сотрудник"), "Сохранил(а) черновик")
     is_admin = user_id in admin_ids or user_id in manager_ids
@@ -266,11 +266,20 @@ async def wizard_save_exit(callback: CallbackQuery, state: FSMContext):
 async def wizard_skip_item(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     current_item = data.get("current_item")
-    if current_item:
+    
+    # П.3: Защита от удаления позиции во время мастера
+    if current_item and current_item not in inventory:
+        data["current_item"] = get_next_item(data)
+        await state.update_data(data)
+        await _wizard_show_step(callback.bot, state, callback.message.chat.id)
+        await callback.answer("⏩ Позиция была удалена, пропускаем")
+        return
+        
+    if current_item and current_item in inventory:
         if inventory[current_item].get("is_dessert"):
-            data.setdefault("collected_data", {})[current_item] = {"qty": inventory[current_item]["qty"], "display_qty": inventory[current_item]["display_qty"]}
+            data.setdefault("collected_data", {})[current_item] = {"qty": inventory[current_item].get("qty", 0), "display_qty": inventory[current_item].get("display_qty", 0)}
         else:
-            data.setdefault("collected_data", {})[current_item] = inventory[current_item]["qty"]
+            data.setdefault("collected_data", {})[current_item] = inventory[current_item].get("qty", 0)
         data.setdefault("history", []).append(current_item)
         data["current_item"] = get_next_item(data)
         new_admin_msg_id = await notification_service.update_admin_progress(callback.bot, ADMIN_ID, users_db.get(callback.from_user.id, "Сотрудник"), data.get("collected_data", {}), inventory, data.get("admin_msg_id"))
@@ -348,14 +357,14 @@ async def wizard_cancel(callback: CallbackQuery, state: FSMContext):
     
     if msg_id:
         try: await callback.bot.delete_message(callback.message.chat.id, msg_id)
-        except Exception: pass
+        except Exception as e: logging.warning(f"Не удалось удалить сообщение при отмене мастера: {e}")
         
     log_service.add_log(user_id, users_db.get(user_id, "Неизвестный"), "отменил(а) составление остатков")
     save_state()
     
     if admin_msg_id:
         try: await callback.bot.delete_message(ADMIN_ID, admin_msg_id)
-        except Exception: pass
+        except Exception as e: logging.warning(f"Не удалось удалить сообщение прогресса при отмене: {e}")
         
     await notification_service.update_admin_status(callback.bot, ADMIN_ID, user_id, users_db.get(user_id, "Сотрудник"), action="cancel")
     is_admin = user_id in admin_ids or user_id in manager_ids
@@ -378,8 +387,18 @@ async def process_wizard_qty(message: Message, state: FSMContext):
     data = await state.get_data()
     current_item = data.get("current_item")
     if not current_item: return
+    
+    # П.3: Защита от удаления позиции во время мастера
+    if current_item not in inventory:
+        await message.answer("⚠️ Эта позиция была удалена администратором. Переходим к следующей.")
+        data["current_item"] = get_next_item(data)
+        await state.update_data(data)
+        await _wizard_show_step(message.bot, state, message.chat.id)
+        return
+        
     try: await message.delete()
-    except Exception: pass
+    except Exception as e: logging.warning(f"Не удалось удалить сообщение с числом: {e}")
+    
     if inventory[current_item].get("is_dessert"):
         await state.update_data(temp_total_qty=round(val, 2))
         await state.set_state(InventoryStates.wizard_display_qty)
@@ -388,7 +407,7 @@ async def process_wizard_qty(message: Message, state: FSMContext):
         msg_id = data.get("wizard_message_id")
         if msg_id:
             try: await message.bot.edit_message_text(chat_id=message.chat.id, message_id=msg_id, text=text, reply_markup=keyboard, parse_mode="HTML")
-            except Exception: pass
+            except Exception as e: logging.warning(f"Не удалось обновить шаг на витрину: {e}")
         return
     data.setdefault("collected_data", {})[current_item] = round(val, 2)
     data.setdefault("history", []).append(current_item)
@@ -412,8 +431,18 @@ async def process_wizard_display_qty(message: Message, state: FSMContext):
     data = await state.get_data()
     current_item = data.get("current_item")
     total_qty = data.get("temp_total_qty")
+    
+    # П.3: Защита от удаления позиции во время мастера
+    if current_item not in inventory:
+        await message.answer("⚠️ Эта позиция была удалена администратором. Переходим к следующей.")
+        data["current_item"] = get_next_item(data)
+        await state.update_data(data)
+        await _wizard_show_step(message.bot, state, message.chat.id)
+        return
+        
     try: await message.delete()
-    except Exception: pass
+    except Exception as e: logging.warning(f"Не удалось удалить сообщение с числом витрины: {e}")
+    
     data.setdefault("collected_data", {})[current_item] = {"qty": total_qty, "display_qty": round(val, 2)}
     data.setdefault("history", []).append(current_item)
     data["current_item"] = get_next_item(data)

@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from datetime import datetime
 from aiogram import Router, F
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
@@ -25,21 +26,27 @@ async def cb_iiko_view(callback: CallbackQuery, is_manager: bool, skip_answer=Fa
             [InlineKeyboardButton(text="⚙️ Сканировать техкарты", callback_data="iiko_scan_techcards")],
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_panel")]
         ])
-        await callback.message.edit_text(
-            "🍽 <b>Каталог остатков из iiko</b>\n\n"
-            "⚠️ <b>Техкарты ещё не отсканированы.</b>\n"
-            "Нажмите кнопку ниже, чтобы просканировать их.",
-            reply_markup=keyboard, parse_mode="HTML"
-        )
+        try:
+            await callback.message.edit_text(
+                "🍽 <b>Каталог остатков из iiko</b>\n\n"
+                "⚠️ <b>Техкарты ещё не отсканированы.</b>\n"
+                "Нажмите кнопку ниже, чтобы просканировать их.",
+                reply_markup=keyboard, parse_mode="HTML"
+            )
+        except Exception as e:
+            logging.warning(f"Не удалось показать меню iiko: {e}")
         return
 
-    await callback.message.edit_text(
-        "🍽 <b>Каталог остатков из iiko</b>\n\n"
-        "Выберите, что хотите посмотреть:\n"
-        "• <b>📊 Текущие остатки</b> — что сейчас есть на складе\n"
-        "• <b>🔄 Движения за сегодня</b> — что пришло, продалось или списалось",
-        reply_markup=get_iiko_menu(), parse_mode="HTML"
-    )
+    try:
+        await callback.message.edit_text(
+            "🍽 <b>Каталог остатков из iiko</b>\n\n"
+            "Выберите, что хотите посмотреть:\n"
+            "• <b>📊 Текущие остатки</b> — что сейчас есть на складе\n"
+            "• <b>🔄 Движения за сегодня</b> — что пришло, продалось или списалось",
+            reply_markup=get_iiko_menu(), parse_mode="HTML"
+        )
+    except Exception as e:
+        logging.warning(f"Не удалось открыть меню iiko: {e}")
 
 @router.callback_query(F.data == "iiko_scan_techcards")
 async def cb_iiko_scan(callback: CallbackQuery, is_manager: bool):

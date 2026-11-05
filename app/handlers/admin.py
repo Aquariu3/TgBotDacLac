@@ -1,7 +1,9 @@
 from aiogram import Router, F
 from aiogram.fsm.context import FSMContext
+import asyncio
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.exceptions import TelegramBadRequest
+import logging
 
 from app.state import inventory, users_db, user_progress, admin_ids, manager_ids, log_service, save_state, ADMIN_ID, last_menu_messages
 from app.states.states import InventoryStates
@@ -134,12 +136,10 @@ async def cb_make_role(callback: CallbackQuery, is_manager: bool):
         save_state()
         
         try:
-            # Удаляем старое меню пользователя, чтобы не висело
             if target_id in last_menu_messages:
                 try: await callback.bot.delete_message(target_id, last_menu_messages[target_id])
-                except Exception: pass
+                except Exception as e: logging.warning(f"Не удалось удалить меню у {target_id}: {e}")
             
-            # Отправляем уведомление и сохраняем его ID как текущее меню пользователя
             msg = await callback.bot.send_message(
                 target_id, 
                 f"👑 <b>Вам выданы права {role_name.lower()}а!</b>\n"
@@ -147,7 +147,8 @@ async def cb_make_role(callback: CallbackQuery, is_manager: bool):
                 parse_mode="HTML"
             )
             last_menu_messages[target_id] = msg.message_id
-        except Exception: pass
+        except Exception as e:
+            logging.warning(f"Не удалось отправить уведомление о правах {target_id}: {e}")
     
     await _render_role_menu(callback.message, role_type)
     await callback.answer(f"✅ {target_name} теперь {role_name}!")
@@ -199,19 +200,19 @@ async def cb_do_demote(callback: CallbackQuery, is_manager: bool):
         save_state()
         
         try:
-            # Удаляем старое меню
             if target_id in last_menu_messages:
                 try: await callback.bot.delete_message(target_id, last_menu_messages[target_id])
-                except Exception: pass
+                except Exception as e: logging.warning(f"Не удалось удалить меню у {target_id}: {e}")
             
-            # Отправляем уведомление и сохраняем его ID
             msg = await callback.bot.send_message(
                 target_id, 
-                f"⚠️ <b>Ваши права {role_name.lower()}а были отозваны.</b>\n\nЕсли вы сейчас заполняете остатки, нажмите «Сохранить и выйти», чтобы не потерять данные.", 
+                f"👑 <b>Вам выданы права {role_name.lower()}а!</b>\n"
+                "Нажмите /start, чтобы увидеть панель.", 
                 parse_mode="HTML"
             )
             last_menu_messages[target_id] = msg.message_id
-        except Exception: pass
+        except Exception as e:
+            logging.warning(f"Не удалось отправить уведомление о правах {target_id}: {e}")
     
     await _render_role_menu(callback.message, role_type)
     await callback.answer(f"✅ {target_name} больше не {role_name}")
@@ -298,6 +299,16 @@ async def cb_history_user(callback: CallbackQuery, is_manager: bool):
             
     buttons.append([InlineKeyboardButton(text="⬅️ Назад к пользователям", callback_data="admin_users")])
     keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramBadRequest as e:
+        if "message is not modified" not in str(e):
+            await callback.message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+    except Exception as e:
+        logging.warning(f"Не удалось обновить историю: {e}")
+        await callback.message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+    await callback.answer()
     
     await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
     await callback.answer()
@@ -340,6 +351,17 @@ async def cb_view_log(callback: CallbackQuery, is_manager: bool):
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=back_cb)])
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramBadRequest as e:
+        if "message is not modified" not in str(e):
+            await callback.message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+    except Exception as e:
+        logging.warning(f"Не удалось обновить историю: {e}")
+        await callback.message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+    await callback.answer()
+
     await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
     await callback.answer()
 
@@ -396,7 +418,7 @@ async def cb_undo_action(callback: CallbackQuery, is_manager: bool):
         
         # Защищаем от повторного отката, удаляя метку undo_type из лога
         snap["undo_type"] = None
-        log_service.repo.save_logs(log_service.logs)
+        await asyncio.to_thread(log_service.repo.save_logs, list(log_service.logs))
         
         await callback.answer("✅ Действие успешно отменено!", show_alert=True)
         await cb_admin_users(callback, is_manager=is_manager) # Возвращаем в историю

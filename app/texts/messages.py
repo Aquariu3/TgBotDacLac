@@ -5,7 +5,7 @@ def build_key_remainders_text(inventory: dict) -> str:
     for name in KEY_ITEMS:
         if name in inventory: 
             unit = inventory[name].get("unit", "шт")
-            lines.append(f"• {name}: <b>{inventory[name]['qty']}</b> {unit}")
+            lines.append(f"• {name}: <b>{inventory[name].get('qty', 0)}</b> {unit}")
     return "\n".join(lines)
 
 def get_main_menu_text(inventory: dict, has_access: bool, user_name: str) -> str:
@@ -25,13 +25,21 @@ def build_admin_progress_text(inventory: dict, user_name: str, collected: dict) 
 
 def build_inventory_text(inventory: dict, header: str) -> str:
     lines = [header]
-    current_cat = None
+    
+    # Группируем по категориям, чтобы новые позиции не создавали дубли заголовков
+    grouped = {}
     for name, data in inventory.items():
-        cat = data["category"]
-        if cat != current_cat:
-            current_cat = cat
-            lines.append(f"\n<b>{CATEGORY_NAMES.get(cat, cat)}</b>")
-        unit = data.get("unit", "шт")
-        if data.get("is_dessert"): lines.append(f"• {name}: всего <b>{data['qty']}</b> {unit}, витрина <b>{data['display_qty']}</b>")
-        else: lines.append(f"• {name}: <b>{data['qty']}</b> {unit}")
+        cat = data.get("category", "other")
+        if cat not in grouped:
+            grouped[cat] = []
+        grouped[cat].append((name, data))
+        
+    for cat, items in grouped.items():
+        lines.append(f"\n<b>{CATEGORY_NAMES.get(cat, cat)}</b>")
+        for name, data in items:
+            unit = data.get("unit", "шт")
+            if data.get("is_dessert"): 
+                lines.append(f"• {name}: всего <b>{data.get('qty', 0)}</b> {unit}, витрина <b>{data.get('display_qty', 0)}</b>")
+            else: 
+                lines.append(f"• {name}: <b>{data.get('qty', 0)}</b> {unit}")
     return "\n".join(lines)

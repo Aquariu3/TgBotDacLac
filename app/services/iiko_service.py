@@ -9,6 +9,7 @@ from iikocloudapi import AppAuth, IikoCloud
 from app.domain.constants import SUPPLY_KEYWORDS, DESSERT_KEYWORDS, BAR_KEYWORDS, KITCHEN_KEYWORDS
 from app.config import settings
 from app.repositories.base import JsonRepository
+
 class IikoService:
     def __init__(self, tech_cards_file: str):
         self.tech_cards_file = tech_cards_file
@@ -55,7 +56,13 @@ class IikoService:
         payload = {"apiKey": settings.IIKO_API_KEY, "appId": settings.IIKO_APP_ID, "clientSecret": settings.IIKO_CLIENT_SECRET}
         try:
             resp = requests.post(url, json=payload, timeout=30)
-            return resp.json().get("token") if resp.status_code == 200 else None
+            if resp.status_code == 200:
+                try:
+                    return resp.json().get("token")
+                except Exception as e:
+                    logging.error(f"Ошибка парсинга JSON токена: {e}")
+                    return None
+            return None
         except Exception as e:
             logging.error(f"Ошибка токена: {e}")
             return None
@@ -71,11 +78,17 @@ class IikoService:
         limit = 1000
         while True:
             payload = {"filters": [], "limit": limit, "offset": offset}
-            resp = requests.post(url, json=payload, headers=headers, timeout=60)
-            if resp.status_code != 200:
-                print(f"⚠️ Ошибка загрузки номенклатуры: {resp.status_code} - {resp.text}")
+            try:
+                resp = requests.post(url, json=payload, headers=headers, timeout=60)
+                if resp.status_code != 200:
+                    logging.warning(f"⚠️ Ошибка загрузки номенклатуры: {resp.status_code} - {resp.text}")
+                    break
+                data = resp.json()
+            except Exception as e:
+                logging.error(f"Ошибка при запросе или парсинге номенклатуры: {e}")
                 break
-            items = resp.json().get("items", [])
+            
+            items = data.get("items", [])
             if not items: break
             for p in items:
                 pid = p.get("productId") or p.get("id")
@@ -98,11 +111,16 @@ class IikoService:
         limit = 1000
         while True:
             payload = {"filters": [], "limit": limit, "offset": offset}
-            resp = requests.post(url, json=payload, headers=headers, timeout=60)
-            if resp.status_code != 200:
-                print(f"⚠️ Ошибка загрузки групп: {resp.status_code} - {resp.text}")
+            try:
+                resp = requests.post(url, json=payload, headers=headers, timeout=60)
+                if resp.status_code != 200:
+                    logging.warning(f"⚠️ Ошибка загрузки групп: {resp.status_code} - {resp.text}")
+                    break
+                data = resp.json()
+            except Exception as e:
+                logging.error(f"Ошибка при запросе или парсинге групп: {e}")
                 break
-            data = resp.json()
+            
             items = data.get("groups", [])
             if not items:
                 break
@@ -125,11 +143,11 @@ class IikoService:
         try:
             resp = requests.post(url, json=payload, headers=headers, timeout=60)
             if resp.status_code != 200:
-                print(f"⚠️ Ошибка запроса {doc_type}: {resp.status_code} - {resp.text}")
+                logging.warning(f"⚠️ Ошибка запроса {doc_type}: {resp.status_code} - {resp.text}")
                 return []
             return resp.json()
         except Exception as e:
-            print(f"⚠️ Исключение при запросе {doc_type}: {e}")
+            logging.error(f"⚠️ Исключение при запросе {doc_type}: {e}")
             return []
 
     def sync_get_all_tech_cards(self, token):
@@ -143,20 +161,24 @@ class IikoService:
             try:
                 resp = requests.post(url, json=payload, headers=headers, timeout=30)
                 if resp.status_code == 200:
-                    return resp.json()
+                    try:
+                        return resp.json()
+                    except Exception as e:
+                        logging.error(f"Ошибка парсинга JSON техкарт: {e}")
+                        return None
                 elif resp.status_code == 429:
                     wait_time = 2 ** attempt  # 1, 2, 4 сек
-                    print(f"⚠️ Лимит запросов iiko (429). Ждём {wait_time} сек и пробуем снова...")
+                    logging.warning(f"⚠️ Лимит запросов iiko (429). Ждём {wait_time} сек и пробуем снова...")
                     time.sleep(wait_time)
                     continue
                 else:
-                    print(f"⚠️ Ошибка массового запроса техкарт: {resp.status_code} - {resp.text}")
+                    logging.warning(f"⚠️ Ошибка массового запроса техкарт: {resp.status_code} - {resp.text}")
                     return None
             except Exception as e:
-                print(f"⚠️ Исключение при массовом запросе техкарт: {e}")
+                logging.error(f"⚠️ Исключение при массовом запросе техкарт: {e}")
                 return None
 
-        print("⚠️ Не удалось получить техкарты после 3 попыток (429).")
+        logging.warning("⚠️ Не удалось получить техкарты после 3 попыток (429).")
         return None
 
     def sync_get_tech_card_by_id(self, token, product_id):
@@ -166,13 +188,18 @@ class IikoService:
         try:
             resp = requests.post(url, json=payload, headers=headers, timeout=15)
             if resp.status_code == 200:
-                return resp.json()
+                try:
+                    return resp.json()
+                except Exception as e:
+                    logging.error(f"Ошибка парсинга JSON техкарты {product_id}: {e}")
+                    return None
             elif resp.status_code == 429:
                 time.sleep(2)
                 return self.sync_get_tech_card_by_id(token, product_id)
             else:
                 return None
-        except Exception:
+        except Exception as e:
+            logging.error(f"Ошибка запроса техкарты {product_id}: {e}")
             return None
 
     async def scan_tech_cards_and_nomenclature(self):
@@ -200,7 +227,7 @@ class IikoService:
                 if dish_ings:
                     new_tech_cards_map[dish_id] = dish_ings
         else:
-            print("⚠️ Массовый запрос техкарт не дал результатов. Переходим на точечный перебор с задержкой...")
+            logging.warning("⚠️ Массовый запрос техкарт не дал результатов. Переходим на точечный перебор с задержкой...")
             active_dishes = [pid for pid, p in product_map.items() if p["type"] in ['DISH', 'PREPARATION']]
             for dish_id in active_dishes:
                 resp = await asyncio.to_thread(self.sync_get_tech_card_by_id, token, dish_id)

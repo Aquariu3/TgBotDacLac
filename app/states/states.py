@@ -12,4 +12,5 @@ class AdminEditStates(StatesGroup):
     waiting_for_new_item_name = State()
     waiting_for_new_item_qty = State()
     waiting_for_new_item_display = State()
+    waiting_for_food_type = State()
     waiting_for_new_name = State()

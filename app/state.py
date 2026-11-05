@@ -31,12 +31,10 @@ users_repo = UsersRepository(USERS_FILE)
 logs_repo = LogsRepository(LOGS_FILE)
 progress_repo = ProgressRepository(PROGRESS_FILE)
 
-# Репозитории для трёх «прямых» JSON-файлов — теперь тоже с атомарной записью
 last_messages_repo = JsonRepository(os.path.join(DATA_DIR, "last_messages.json"))
 admins_repo = JsonRepository(ADMINS_FILE)
 managers_repo = JsonRepository(MANAGERS_FILE)
 
-# Блокировка, чтобы save_state() целиком писал «снимок» всех файлов
 _save_state_lock = threading.Lock()
 
 iiko_service = IikoService(TECH_CARDS_FILE)
@@ -62,12 +60,8 @@ def _save_state_sync():
         admins_repo.save(list(admin_ids))
         managers_repo.save(list(manager_ids))
 
-
 def save_state():
-    """Неблокирующее сохранение в фоновом потоке.
-    Если цикл событий запущен (внутри бота) — отправляет задачу в фон.
-    Если его нет (например, при импорте) — сохраняет синхронно.
-    """
+    """Неблокирующее сохранение в фоновом потоке."""
     try:
         loop = asyncio.get_running_loop()
         loop.create_task(asyncio.to_thread(_save_state_sync))
@@ -77,19 +71,21 @@ def save_state():
 def load_state():
     global inventory, users_db, user_progress, last_menu_messages, admin_ids, manager_ids
 
+    # 1. Загрузка склада
     inv = inventory_repo.load_inventory()
     if inv:
         inventory.clear()
-        
-                # --- МАГИЯ ОЧИСТКИ НАЗВАНИЙ ---
         for k, v in inv.items():
-            # Убираем (шт), (кг), (л/шт) и т.д. из конца названия
             clean_name = clean_item_name(k)
             
-            # Если единицы измерения нет, ставим по умолчанию
+            # П.15: Расширенная логика определения единиц измерения
             if "unit" not in v:
-                if "(кг)" in k.lower() or "кг" in k.lower(): v["unit"] = "кг"
-                elif "(л" in k.lower() or " л" in k.lower(): v["unit"] = "л"
+                name_lower = k.lower()
+                if "кг" in name_lower: v["unit"] = "кг"
+                elif "мл" in name_lower: v["unit"] = "мл"
+                elif "гр" in name_lower or " г" in name_lower: v["unit"] = "гр"
+                elif "уп" in name_lower: v["unit"] = "уп"
+                elif "л" in name_lower: v["unit"] = "л"
                 else: v["unit"] = "шт"
                 
             inventory[clean_name] = v
@@ -101,33 +97,42 @@ def load_state():
             "Стакан 350": {"qty": 150.0, "category": "supplies", "subcategory": "cups", "unit": "шт"},
         })
 
+    # 2. Загрузка пользователей (через clear/update, чтобы не ломать импорты)
     users = users_repo.load_users()
     if users:
-        users_db = users
+        users_db.clear()
+        users_db.update(users)
         print(f"✅ Загружено {len(users_db)} пользователей")
 
+    # 3. Загрузка черновиков
     prog = progress_repo.load_progress()
     if prog:
-        user_progress = prog
+        user_progress.clear()
+        user_progress.update(prog)
         print(f"✅ Загружено {len(prog)} черновиков")
 
+    # 4. Загрузка сообщений меню
     msg_file = os.path.join(DATA_DIR, "last_messages.json")
     if os.path.exists(msg_file):
         try:
             with open(msg_file, "r", encoding="utf-8") as f:
-                last_menu_messages = {int(k): v for k, v in json.load(f).items()}
+                last_menu_messages.clear()
+                last_menu_messages.update({int(k): v for k, v in json.load(f).items()})
         except Exception: pass
         
+    # 5. Загрузка ролей (П.11: защита от строк)
     if os.path.exists(ADMINS_FILE):
         try:
             with open(ADMINS_FILE, "r", encoding="utf-8") as f:
-                admin_ids.update(json.load(f))
+                for a_id in json.load(f):
+                    try: admin_ids.add(int(a_id))
+                    except (ValueError, TypeError): pass
         except Exception: pass
         
     if os.path.exists(MANAGERS_FILE):
         try:
             with open(MANAGERS_FILE, "r", encoding="utf-8") as f:
-                manager_ids.update(json.load(f))
+                for m_id in json.load(f):
+                    try: manager_ids.add(int(m_id))
+                    except (ValueError, TypeError): pass
         except Exception: pass
-
-load_state()
