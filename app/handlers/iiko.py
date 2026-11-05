@@ -10,8 +10,11 @@ from app.keyboards.admin_kb import get_iiko_menu
 router = Router()
 
 @router.callback_query(F.data == "iiko_view")
-async def cb_iiko_view(callback: CallbackQuery, skip_answer=False):
-    if callback.from_user.id != ADMIN_ID and callback.from_user.id not in manager_ids: return
+async def cb_iiko_view(callback: CallbackQuery, is_manager: bool, skip_answer=False):
+    if not is_manager: 
+        await callback.message.delete()
+        await callback.answer()
+        return
     
     if not skip_answer:
         try: await callback.answer()
@@ -39,8 +42,11 @@ async def cb_iiko_view(callback: CallbackQuery, skip_answer=False):
     )
 
 @router.callback_query(F.data == "iiko_scan_techcards")
-async def cb_iiko_scan(callback: CallbackQuery):
-    if callback.from_user.id != ADMIN_ID and callback.from_user.id not in manager_ids: return
+async def cb_iiko_scan(callback: CallbackQuery, is_manager: bool):
+    if not is_manager: 
+        await callback.message.delete()
+        await callback.answer()
+        return
     
     try: await callback.answer("Сканируем...")
     except Exception: pass
@@ -50,14 +56,17 @@ async def cb_iiko_scan(callback: CallbackQuery):
         count = await iiko_service.scan_tech_cards_and_nomenclature()
         await callback.message.edit_text(f"✅ <b>Сканирование завершено!</b>\nНайдено {count} уникальных ингредиентов в техкартах.")
         await asyncio.sleep(2)
-        await cb_iiko_view(callback, skip_answer=True)
+        await cb_iiko_view(callback, is_manager=is_manager, skip_answer=True)
     except Exception as e:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_other_menu")]])
         await callback.message.edit_text(f"❌ Ошибка при сканировании:\n<code>{e}</code>", reply_markup=keyboard, parse_mode="HTML")
 
 @router.callback_query(F.data == "iiko_current_stock")
-async def cb_iiko_current_stock(callback: CallbackQuery, skip_answer=False):
-    if callback.from_user.id != ADMIN_ID and callback.from_user.id not in manager_ids: return
+async def cb_iiko_current_stock(callback: CallbackQuery, is_manager: bool, skip_answer=False):
+    if not is_manager: 
+        await callback.message.delete()
+        await callback.answer()
+        return
     
     if not skip_answer:
         try: await callback.answer()
@@ -98,18 +107,24 @@ async def cb_iiko_current_stock(callback: CallbackQuery, skip_answer=False):
     )
 
 @router.callback_query(F.data == "iiko_refresh_stock")
-async def cb_iiko_refresh_stock(callback: CallbackQuery):
-    if callback.from_user.id != ADMIN_ID and callback.from_user.id not in manager_ids: return
+async def cb_iiko_refresh_stock(callback: CallbackQuery, is_manager: bool):
+    if not is_manager: 
+        await callback.message.delete()
+        await callback.answer()
+        return
     
     try: await callback.answer("Обновляем...")
     except Exception: pass
     
     iiko_service.iiko_cache_time = None
-    await cb_iiko_current_stock(callback, skip_answer=True)
+    await cb_iiko_current_stock(callback, is_manager=is_manager, skip_answer=True)
 
 @router.callback_query(F.data.startswith("iiko_cat_"))
-async def cb_iiko_category(callback: CallbackQuery):
-    if callback.from_user.id != ADMIN_ID and callback.from_user.id not in manager_ids: return
+async def cb_iiko_category(callback: CallbackQuery, is_manager: bool):
+    if not is_manager: 
+        await callback.message.delete()
+        await callback.answer()
+        return
     
     try: await callback.answer()
     except Exception: pass
@@ -134,8 +149,11 @@ async def cb_iiko_category(callback: CallbackQuery):
     await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
 
 @router.callback_query(F.data == "iiko_movements")
-async def cb_iiko_movements(callback: CallbackQuery):
-    if callback.from_user.id != ADMIN_ID and callback.from_user.id not in manager_ids: return
+async def cb_iiko_movements(callback: CallbackQuery, is_manager: bool):
+    if not is_manager: 
+        await callback.message.delete()
+        await callback.answer()
+        return
     
     try: await callback.answer()
     except Exception: pass

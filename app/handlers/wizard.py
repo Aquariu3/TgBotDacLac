@@ -133,8 +133,7 @@ async def start_inventory_wizard(callback: CallbackQuery, state: FSMContext):
     except Exception: pass
     data = {
         "collected_data": {}, "history": [], "active_category": None,
-        "current_item": None, "wizard_message_id": None, "wizard_user_id": user_id, "admin_msg_id": None,
-        "original_inventory": copy.deepcopy(inventory)
+        "current_item": None, "wizard_message_id": None, "wizard_user_id": user_id, "admin_msg_id": None
     }
     await state.update_data(data)
     await state.set_state(InventoryStates.wizard_qty)
@@ -176,56 +175,38 @@ async def wizard_restart(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "wizard_restart_save")
 async def wizard_restart_save(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
-    data = await state.get_data()
     if user_id in user_progress:
-        saved = user_progress.pop(user_id)
-        collected = saved.get("collected_data", {})
-    else:
-        collected = data.get("collected_data", {})
-    for k, v in collected.items():
-        if k in inventory:
-            if isinstance(v, dict):
-                inventory[k]["qty"] = v.get("qty", inventory[k]["qty"])
-                inventory[k]["display_qty"] = v.get("display_qty", inventory[k].get("display_qty", 0))
-            else:
-                inventory[k]["qty"] = v
+        user_progress.pop(user_id) # Просто удаляем черновик, ничего не откатываем
+        
     try: await callback.message.delete()
     except Exception: pass
+    
     new_data = {
         "collected_data": {}, "history": [], "active_category": None,
-        "current_item": None, "wizard_message_id": None, "wizard_user_id": user_id, "admin_msg_id": None,
-        "original_inventory": copy.deepcopy(inventory)
+        "current_item": None, "wizard_message_id": None, "wizard_user_id": user_id, "admin_msg_id": None
     }
     await state.update_data(new_data)
     await state.set_state(InventoryStates.wizard_qty)
-    log_service.add_log(user_id, users_db.get(user_id, "Неизвестный"), "сбросил(а) черновик и начал(а) заново (данные сохранены)")
+    log_service.add_log(user_id, users_db.get(user_id, "Неизвестный"), "сбросил(а) черновик и начал(а) заново")
     save_state()
     await notification_service.update_admin_status(callback.bot, ADMIN_ID, user_id, users_db.get(user_id, "Сотрудник"), "Сбросил(а) черновик и начал(а) заново")
     new_admin_msg_id = await notification_service.update_admin_progress(callback.bot, ADMIN_ID, users_db.get(user_id, "Сотрудник"), new_data.get("collected_data", {}), inventory, new_data.get("admin_msg_id"))
     await state.update_data(admin_msg_id=new_admin_msg_id)
     await _wizard_show_step(callback.bot, state, callback.message.chat.id)
-    await callback.answer("Данные сохранены. Начинаем заново.")
+    await callback.answer("Черновик удален. Начинаем заново.")
 
 @router.callback_query(F.data == "wizard_restart_drop")
 async def wizard_restart_drop(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
-    data = await state.get_data()
     if user_id in user_progress:
-        saved = user_progress.pop(user_id)
-        orig_inv = saved.get("original_inventory")
-        if orig_inv:
-            inventory.clear()
-            inventory.update(orig_inv)
-    elif "original_inventory" in data:
-        orig_inv = data["original_inventory"]
-        inventory.clear()
-        inventory.update(orig_inv)
+        user_progress.pop(user_id)
+        
     try: await callback.message.delete()
     except Exception: pass
+    
     new_data = {
         "collected_data": {}, "history": [], "active_category": None,
-        "current_item": None, "wizard_message_id": None, "wizard_user_id": user_id, "admin_msg_id": None,
-        "original_inventory": copy.deepcopy(inventory)
+        "current_item": None, "wizard_message_id": None, "wizard_user_id": user_id, "admin_msg_id": None
     }
     await state.update_data(new_data)
     await state.set_state(InventoryStates.wizard_qty)
@@ -244,27 +225,26 @@ async def wizard_save_exit(callback: CallbackQuery, state: FSMContext):
     collected = data.get("collected_data", {})
     msg_id = data.get("wizard_message_id")
     admin_msg_id = data.get("admin_msg_id")
-    for k, v in collected.items():
-        if k in inventory:
-            if isinstance(v, dict):
-                inventory[k]["qty"] = v.get("qty", inventory[k]["qty"])
-                inventory[k]["display_qty"] = v.get("display_qty", inventory[k].get("display_qty", 0))
-            else:
-                inventory[k]["qty"] = v
+    
+    # Данные НЕ применяем к inventory. Просто сохраняем как черновик.
     user_progress[user_id] = data
     await state.clear()
+    
     if msg_id:
         try: await callback.bot.delete_message(callback.message.chat.id, msg_id)
         except Exception: pass
+        
     log_service.add_log(user_id, users_db.get(user_id, "Неизвестный"), "сохранил(а) черновик остатков", snapshot=collected)
     save_state()
+    
     if admin_msg_id:
         try: await callback.bot.delete_message(ADMIN_ID, admin_msg_id)
         except Exception: pass
+        
     await notification_service.update_admin_status(callback.bot, ADMIN_ID, user_id, users_db.get(user_id, "Сотрудник"), "Сохранил(а) черновик")
     is_admin = user_id in admin_ids or user_id in manager_ids
     user_name = users_db.get(user_id, "Сотрудник")
-    text = f"💾 <b>Прогресс сохранен!</b>\n\nВведенные цифры записаны в базу. Вы можете вернуться и завершить сбор в любое время.\n\n" + get_main_menu_text(inventory, is_admin, user_name)
+    text = f"💾 <b>Прогресс сохранен!</b>\n\nВведенные цифры записаны в память. Вы можете вернуться и завершить сбор в любое время.\n\n" + get_main_menu_text(inventory, is_admin, user_name)
     await callback.message.answer(text, reply_markup=get_main_menu(is_admin), parse_mode="HTML")
     await callback.answer("Сохранено")
 
@@ -346,29 +326,27 @@ async def wizard_cancel(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     msg_id = data.get("wizard_message_id")
     admin_msg_id = data.get("admin_msg_id")
+    
     if user_id in user_progress:
-        saved = user_progress.pop(user_id)
-        orig_inv = saved.get("original_inventory")
-        if orig_inv:
-            inventory.clear()
-            inventory.update(orig_inv)
-    elif "original_inventory" in data:
-        orig_inv = data["original_inventory"]
-        inventory.clear()
-        inventory.update(orig_inv)
+        user_progress.pop(user_id)
+        
     await state.clear()
+    
     if msg_id:
         try: await callback.bot.delete_message(callback.message.chat.id, msg_id)
         except Exception: pass
+        
     log_service.add_log(user_id, users_db.get(user_id, "Неизвестный"), "отменил(а) составление остатков")
     save_state()
+    
     if admin_msg_id:
         try: await callback.bot.delete_message(ADMIN_ID, admin_msg_id)
         except Exception: pass
+        
     await notification_service.update_admin_status(callback.bot, ADMIN_ID, user_id, users_db.get(user_id, "Сотрудник"), action="cancel")
     is_admin = user_id in admin_ids or user_id in manager_ids
     user_name = users_db.get(user_id, "Сотрудник")
-    text = f"❌ Сбор остатков отменён (незавершенные данные удалены).\n\n" + get_main_menu_text(inventory, is_admin, user_name)
+    text = f"❌ Сбор остатков отменён (черновик удален, склад не тронут).\n\n" + get_main_menu_text(inventory, is_admin, user_name)
     await callback.message.answer(text, reply_markup=get_main_menu(is_admin), parse_mode="HTML")
     await callback.answer()
 

@@ -3,7 +3,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.exceptions import TelegramBadRequest
 
-from app.state import inventory, users_db, user_progress, admin_ids, manager_ids, log_service, save_state, ADMIN_ID
+from app.state import inventory, users_db, user_progress, admin_ids, manager_ids, log_service, save_state, ADMIN_ID, last_menu_messages
 from app.states.states import InventoryStates
 from app.keyboards.admin_kb import (
     get_admin_panel_keyboard, 
@@ -15,7 +15,6 @@ from app.keyboards.admin_kb import (
 
 router = Router()
 
-# --- ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ДЛЯ ОТРИСОВКИ МЕНЮ РОЛЕЙ ---
 async def _render_role_menu(message: Message, role_type: str):
     is_admin_role = (role_type == "admin")
     role_name = "Администраторы" if is_admin_role else "Управляющие"
@@ -24,7 +23,7 @@ async def _render_role_menu(message: Message, role_type: str):
     current_users = []
     for uid in target_set:
         if uid == ADMIN_ID and is_admin_role:
-            continue # Главного админа не показываем, его нельзя удалить
+            continue 
         current_users.append((uid, users_db.get(uid, "Сотрудник")))
 
     text = f"👑 <b>{role_name}</b>\n\n"
@@ -41,21 +40,18 @@ async def _render_role_menu(message: Message, role_type: str):
         parse_mode="HTML"
     )
 
-# --- ГЛАВНОЕ МЕНЮ ---
-
 @router.callback_query(F.data == "admin_panel")
-async def cb_admin_panel(callback: CallbackQuery):
-    is_full_access = (callback.from_user.id == ADMIN_ID or callback.from_user.id in manager_ids)
-    is_any_admin = (callback.from_user.id in admin_ids or is_full_access)
-    
-    if not is_any_admin:
-        await callback.answer("⛔ У вас нет прав администратора!", show_alert=True)
+async def cb_admin_panel(callback: CallbackQuery, is_admin: bool, is_manager: bool):
+    if not is_admin:
+        await callback.message.delete()
+        await callback.message.answer("⛔ У вас нет прав администратора! Нажмите /start")
         return
     
+    is_full_access = is_manager
     text = "⚙️ <b>Панель Управляющего</b>\n\nЗдесь вы можете контролировать остатки и смотреть активность сотрудников."
     kb = get_admin_panel_keyboard(is_full_access)
     
-    if callback.message.text.startswith(("✅", "💾", "❌", "📝", "🔔")):
+    if callback.message.text and callback.message.text.startswith(("✅", "💾", "❌", "📝", "🔔")):
         try: await callback.message.delete()
         except Exception: pass
         await callback.message.answer(text, reply_markup=kb, parse_mode="HTML")
@@ -64,9 +60,10 @@ async def cb_admin_panel(callback: CallbackQuery):
     await callback.answer()
 
 @router.callback_query(F.data == "admin_other_menu")
-async def cb_admin_other_menu(callback: CallbackQuery):
-    if callback.from_user.id != ADMIN_ID and callback.from_user.id not in manager_ids:
-        await callback.answer("⛔ У вас нет прав!", show_alert=True)
+async def cb_admin_other_menu(callback: CallbackQuery, is_manager: bool):
+    if not is_manager:
+        await callback.message.delete()
+        await callback.message.answer("⛔ У вас нет прав! Нажмите /start")
         return
     
     await callback.message.edit_text(
@@ -76,18 +73,22 @@ async def cb_admin_other_menu(callback: CallbackQuery):
     )
     await callback.answer()
 
-# --- УПРАВЛЕНИЕ РОЛЯМИ ---
-
 @router.callback_query(F.data.in_({"admin_manage_admins", "admin_manage_managers"}))
-async def cb_manage_roles(callback: CallbackQuery):
-    if callback.from_user.id != ADMIN_ID and callback.from_user.id not in manager_ids: return
+async def cb_manage_roles(callback: CallbackQuery, is_manager: bool):
+    if not is_manager: 
+        await callback.message.delete()
+        await callback.answer()
+        return
     role_type = "admin" if callback.data == "admin_manage_admins" else "manager"
     await _render_role_menu(callback.message, role_type)
     await callback.answer()
 
 @router.callback_query(F.data.startswith("admin_add_role_"))
-async def cb_admin_add_role(callback: CallbackQuery):
-    if callback.from_user.id != ADMIN_ID and callback.from_user.id not in manager_ids: return
+async def cb_admin_add_role(callback: CallbackQuery, is_manager: bool):
+    if not is_manager: 
+        await callback.message.delete()
+        await callback.answer()
+        return
     
     role_type = callback.data.replace("admin_add_role_", "")
     is_admin_role = (role_type == "admin")
@@ -95,7 +96,7 @@ async def cb_admin_add_role(callback: CallbackQuery):
 
     keyboard = get_users_to_promote_keyboard(users_db, target_list, role_type)
     
-    if len(keyboard.inline_keyboard) == 1: # Только кнопка "Назад"
+    if len(keyboard.inline_keyboard) == 1:
         await callback.answer("Все зарегистрированные пользователи уже имеют эту роль!", show_alert=True)
         return
         
@@ -107,11 +108,14 @@ async def cb_admin_add_role(callback: CallbackQuery):
     await callback.answer()
 
 @router.callback_query(F.data.startswith("make_"))
-async def cb_make_role(callback: CallbackQuery):
-    if callback.from_user.id != ADMIN_ID and callback.from_user.id not in manager_ids: return
+async def cb_make_role(callback: CallbackQuery, is_manager: bool):
+    if not is_manager: 
+        await callback.message.delete()
+        await callback.answer()
+        return
     
     parts = callback.data.split("_")
-    role_type = parts[1] # "admin" или "manager"
+    role_type = parts[1]
     target_id = int(parts[2])
     
     is_admin_role = (role_type == "admin")
@@ -121,7 +125,6 @@ async def cb_make_role(callback: CallbackQuery):
 
     if target_id not in target_list:
         target_list.add(target_id)
-        save_state()
         
         log_service.add_log(
             callback.from_user.id, 
@@ -131,21 +134,30 @@ async def cb_make_role(callback: CallbackQuery):
         save_state()
         
         try:
-            await callback.bot.send_message(
+            # Удаляем старое меню пользователя, чтобы не висело
+            if target_id in last_menu_messages:
+                try: await callback.bot.delete_message(target_id, last_menu_messages[target_id])
+                except Exception: pass
+            
+            # Отправляем уведомление и сохраняем его ID как текущее меню пользователя
+            msg = await callback.bot.send_message(
                 target_id, 
                 f"👑 <b>Вам выданы права {role_name.lower()}а!</b>\n"
                 "Нажмите /start, чтобы увидеть панель.", 
                 parse_mode="HTML"
             )
+            last_menu_messages[target_id] = msg.message_id
         except Exception: pass
     
-    # Отрисовываем меню заново (БЕЗ изменения callback.data)
     await _render_role_menu(callback.message, role_type)
     await callback.answer(f"✅ {target_name} теперь {role_name}!")
 
 @router.callback_query(F.data.startswith("admin_del_role_"))
-async def cb_admin_del_role(callback: CallbackQuery):
-    if callback.from_user.id != ADMIN_ID and callback.from_user.id not in manager_ids: return
+async def cb_admin_del_role(callback: CallbackQuery, is_manager: bool):
+    if not is_manager: 
+        await callback.message.delete()
+        await callback.answer()
+        return
     
     role_type = callback.data.replace("admin_del_role_", "")
     is_admin_role = (role_type == "admin")
@@ -161,8 +173,11 @@ async def cb_admin_del_role(callback: CallbackQuery):
     await callback.answer()
 
 @router.callback_query(F.data.startswith("del_"))
-async def cb_do_demote(callback: CallbackQuery):
-    if callback.from_user.id != ADMIN_ID and callback.from_user.id not in manager_ids: return
+async def cb_do_demote(callback: CallbackQuery, is_manager: bool):
+    if not is_manager: 
+        await callback.message.delete()
+        await callback.answer()
+        return
     
     parts = callback.data.split("_")
     role_type = parts[1]
@@ -175,7 +190,6 @@ async def cb_do_demote(callback: CallbackQuery):
 
     if target_id in target_list:
         target_list.remove(target_id)
-        save_state()
         
         log_service.add_log(
             callback.from_user.id, 
@@ -185,21 +199,29 @@ async def cb_do_demote(callback: CallbackQuery):
         save_state()
         
         try:
-            await callback.bot.send_message(
+            # Удаляем старое меню
+            if target_id in last_menu_messages:
+                try: await callback.bot.delete_message(target_id, last_menu_messages[target_id])
+                except Exception: pass
+            
+            # Отправляем уведомление и сохраняем его ID
+            msg = await callback.bot.send_message(
                 target_id, 
-                f"⚠️ <b>Ваши права {role_name.lower()}а были отозваны.</b>", 
+                f"⚠️ <b>Ваши права {role_name.lower()}а были отозваны.</b>\n\nЕсли вы сейчас заполняете остатки, нажмите «Сохранить и выйти», чтобы не потерять данные.", 
                 parse_mode="HTML"
             )
+            last_menu_messages[target_id] = msg.message_id
         except Exception: pass
     
     await _render_role_menu(callback.message, role_type)
     await callback.answer(f"✅ {target_name} больше не {role_name}")
 
-# --- ОСТАЛЬНЫЕ ФУНКЦИИ (ИСТОРИЯ И УВЕДОМЛЕНИЯ) ---
-
 @router.callback_query(F.data == "admin_users")
-async def cb_admin_users(callback: CallbackQuery):
-    if callback.from_user.id != ADMIN_ID and callback.from_user.id not in manager_ids: return
+async def cb_admin_users(callback: CallbackQuery, is_manager: bool):
+    if not is_manager: 
+        await callback.message.delete()
+        await callback.answer()
+        return
     
     text = "👥 <b>Пользователи и история действий</b>\n\n"
     text += f"<b>Всего пользователей:</b> {len(users_db)}\n"
@@ -232,8 +254,11 @@ async def cb_admin_users(callback: CallbackQuery):
     await callback.answer()
 
 @router.callback_query(F.data.startswith("view_log_"))
-async def cb_view_log(callback: CallbackQuery):
-    if callback.from_user.id != ADMIN_ID and callback.from_user.id not in manager_ids: return
+async def cb_view_log(callback: CallbackQuery, is_manager: bool):
+    if not is_manager: 
+        await callback.message.delete()
+        await callback.answer()
+        return
     log_id = int(callback.data.replace("view_log_", ""))
     log_entry = next((l for l in log_service.logs if l["id"] == log_id), None)
     if not log_entry or not log_entry["snapshot"]:
@@ -254,8 +279,11 @@ async def cb_view_log(callback: CallbackQuery):
     await callback.answer()
 
 @router.callback_query(F.data == "admin_notify")
-async def cb_admin_notify(callback: CallbackQuery):
-    if callback.from_user.id != ADMIN_ID and callback.from_user.id not in manager_ids: return
+async def cb_admin_notify(callback: CallbackQuery, is_manager: bool):
+    if not is_manager: 
+        await callback.message.delete()
+        await callback.answer()
+        return
     buttons = [[InlineKeyboardButton(text="📢 Всем сотрудникам", callback_data="notify_target_all")]]
     for uid, uname in users_db.items():
         if uid not in admin_ids:
@@ -266,19 +294,22 @@ async def cb_admin_notify(callback: CallbackQuery):
     await callback.answer()
 
 @router.callback_query(F.data.startswith("notify_target_"))
-async def cb_notify_target(callback: CallbackQuery, state: FSMContext):
-    if callback.from_user.id != ADMIN_ID and callback.from_user.id not in manager_ids: return
+async def cb_notify_target(callback: CallbackQuery, state: FSMContext, is_manager: bool):
+    if not is_manager: 
+        await callback.message.delete()
+        await callback.answer()
+        return
     target = callback.data.replace("notify_target_", "")
     await state.update_data(notify_target=target, prompt_msg_id=callback.message.message_id)
     await state.set_state(InventoryStates.waiting_for_broadcast_text)
     target_name = "Всем сотрудникам" if target == "all" else users_db.get(int(target), "Сотруднику")
     keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="admin_panel")]])
-    await callback.message.edit_text(f"✍️ Введите текст сообщения для <b>{target_name}</b>.\n\n<i>Вы можете использовать HTML-теги (например, &lt;b&gt;жирный&lt;/b&gt;, &lt;i&gt;курсив&lt;/i&gt;).</i>", reply_markup=keyboard, parse_mode="HTML")
+    await callback.message.edit_text(f"✍️ Введите текст сообщения для <b>{target_name}</b>.\n\n<i>Вы можете использовать HTML-теги.</i>", reply_markup=keyboard, parse_mode="HTML")
     await callback.answer()
 
 @router.message(InventoryStates.waiting_for_broadcast_text)
-async def process_broadcast(message: Message, state: FSMContext):
-    if message.from_user.id != ADMIN_ID and message.from_user.id not in manager_ids: return
+async def process_broadcast(message: Message, state: FSMContext, is_manager: bool):
+    if not is_manager: return
     if not message.text:
         await message.answer("⚠️ Пожалуйста, отправьте текстовое сообщение.")
         return

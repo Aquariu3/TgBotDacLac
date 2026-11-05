@@ -95,7 +95,14 @@ def create_bot() -> Bot:
     return Bot(token=settings.BOT_TOKEN)
 
 def create_dispatcher() -> Dispatcher:
+    from app.middlewares.roles import RoleMiddleware # <-- Импорт
+    
     dp = Dispatcher()
+    
+    # Регистрируем middleware для сообщений и кнопок
+    dp.message.middleware(RoleMiddleware())
+    dp.callback_query.middleware(RoleMiddleware())
+    
     setup_routers(dp)
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)

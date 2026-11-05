@@ -16,21 +16,21 @@ async def cb_dismiss_msg(callback: CallbackQuery):
     except Exception: pass
     await callback.answer("Уведомление прочитано")
 
-def get_user_role(user_id):
-    is_super = user_id == ADMIN_ID
-    is_manager = user_id in manager_ids
-    is_admin = user_id in admin_ids
-    
+def get_user_role(is_super: bool, is_manager: bool, is_admin: bool):
     if is_super: return "👑 <b>Роль: Главный администратор</b>", True
     if is_manager: return "💼 <b>Роль: Управляющий</b>", True
     if is_admin: return "🔑 <b>Роль: Администратор</b>", True
     return "☕ <b>Роль: Бариста</b>", False
 
 @router.message(Command("start"))
-async def cmd_start(message: Message, state: FSMContext):
+async def cmd_start(message: Message, state: FSMContext, is_super: bool, is_manager: bool, is_admin: bool):
     user_id = message.from_user.id
     
-    # Удаляем старые меню
+    # Удаляем команду /start из чата
+    try: await message.delete()
+    except Exception: pass
+    
+    # Удаляем старое меню
     if user_id in last_menu_messages:
         try: await message.bot.delete_message(user_id, last_menu_messages[user_id])
         except Exception: pass
@@ -41,7 +41,7 @@ async def cmd_start(message: Message, state: FSMContext):
         return
     await state.clear()
     user_name = users_db[user_id]
-    role_text, has_access = get_user_role(user_id)
+    role_text, has_access = get_user_role(is_super, is_manager, is_admin)
     
     text = f"Рад видеть вас снова, <b>{user_name}</b>!\n\n{role_text}\n\n" + get_main_menu_text(inventory, has_access, user_name)
     msg = await message.answer(text, reply_markup=get_main_menu(has_access), parse_mode="HTML")
@@ -50,7 +50,7 @@ async def cmd_start(message: Message, state: FSMContext):
     save_state()
 
 @router.message(InventoryStates.waiting_for_reg_name)
-async def process_registration(message: Message, state: FSMContext):
+async def process_registration(message: Message, state: FSMContext, is_super: bool, is_manager: bool, is_admin: bool):
     if not message.text:
         await message.answer("⚠️ Пожалуйста, отправьте текстовое сообщение с вашим именем.")
         return
@@ -61,11 +61,14 @@ async def process_registration(message: Message, state: FSMContext):
     user_id = message.from_user.id
     users_db[user_id] = full_name
     
-    role_text, has_access = get_user_role(user_id)
+    role_text, has_access = get_user_role(is_super, is_manager, is_admin)
     
     log_service.add_log(user_id, full_name, "зарегистрировался(ась) в боте")
-    save_state()
     await state.clear()
+    
+    # Удаляем сообщение пользователя с его именем
+    try: await message.delete()
+    except Exception: pass
     
     text = f"✅ Регистрация успешно завершена!\nДобро пожаловать, <b>{full_name}</b>.\n\n{role_text}\n\n" + get_main_menu_text(inventory, has_access, full_name)
     msg = await message.answer(text, reply_markup=get_main_menu(has_access), parse_mode="HTML")
@@ -74,10 +77,10 @@ async def process_registration(message: Message, state: FSMContext):
     save_state()
 
 @router.callback_query(F.data == "main_menu")
-async def cb_main_menu(callback: CallbackQuery, state: FSMContext):
+async def cb_main_menu(callback: CallbackQuery, state: FSMContext, is_super: bool, is_manager: bool, is_admin: bool):
     await state.clear()
     user_name = users_db.get(callback.from_user.id, "Сотрудник")
-    role_text, has_access = get_user_role(callback.from_user.id)
+    role_text, has_access = get_user_role(is_super, is_manager, is_admin)
     
     text = f"Рад видеть вас снова, <b>{user_name}</b>!\n\n{role_text}\n\n" + get_main_menu_text(inventory, has_access, user_name)
     msg = await callback.message.edit_text(text, reply_markup=get_main_menu(has_access), parse_mode="HTML")
