@@ -1,3 +1,4 @@
+import math
 from aiogram import Router, F
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
@@ -75,13 +76,15 @@ async def cb_set_item_qty(callback: CallbackQuery, state: FSMContext):
 @router.message(InventoryStates.waiting_for_new_qty)
 async def process_new_qty(message: Message, state: FSMContext):
     if not message.text:
-        await message.answer("⚠️ Пожалуйста, отправьте число.")
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="edit_categories_menu")]])
+        await message.answer("⚠️ Пожалуйста, отправьте число.", reply_markup=kb)
         return
     try:
         val = float(message.text.replace(",", "."))
-        if val < 0: raise ValueError
+        if not math.isfinite(val) or val < 0: raise ValueError
     except ValueError:
-        await message.answer("⚠️ Пожалуйста, введите корректное число (0 или больше):")
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="edit_categories_menu")]])
+        await message.answer("⚠️ Пожалуйста, введите корректное число (0 или больше):", reply_markup=kb)
         return
     data = await state.get_data()
     item_name = data.get("item_name")
@@ -135,13 +138,15 @@ async def process_new_qty(message: Message, state: FSMContext):
 @router.message(InventoryStates.waiting_for_new_qty_display)
 async def process_new_qty_display(message: Message, state: FSMContext):
     if not message.text:
-        await message.answer("⚠️ Пожалуйста, отправьте число.")
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="edit_categories_menu")]])
+        await message.answer("⚠️ Пожалуйста, отправьте число.", reply_markup=kb)
         return
     try:
         val = float(message.text.replace(",", "."))
-        if val < 0: raise ValueError
+        if not math.isfinite(val) or val < 0: raise ValueError
     except ValueError:
-        await message.answer("⚠️ Пожалуйста, введите корректное число (0 или больше):")
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="edit_categories_menu")]])
+        await message.answer("⚠️ Пожалуйста, введите корректное число (0 или больше):", reply_markup=kb)
         return
     data = await state.get_data()
     item_name = data.get("item_name")

@@ -10,6 +10,12 @@ class RoleMiddleware(BaseMiddleware):
         event: TelegramObject,
         data: Dict[str, Any]
     ) -> Any:
+        # Дефолты: если по какой-то причине user не определится,
+        # хендлеры с is_admin/is_manager/is_super в аргументах не упадут.
+        data.setdefault("is_super", False)
+        data.setdefault("is_manager", False)
+        data.setdefault("is_admin", False)
+
         # Достаем пользователя из события
         user = data.get("event_from_user")
         

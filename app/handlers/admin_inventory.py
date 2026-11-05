@@ -1,8 +1,9 @@
+import math
 from aiogram import Router, F
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 
-from app.state import inventory, admin_ids, manager_ids, save_state, users_db, last_menu_messages, ADMIN_ID, iiko_async_service
+from app.state import inventory, admin_ids, manager_ids, save_state, users_db, last_menu_messages, ADMIN_ID, iiko_async_service, log_service
 from app.states.states import AdminEditStates
 from app.keyboards.admin_kb import get_adm_categories_menu, get_adm_subcats_menu
 from app.keyboards.main_kb import get_main_menu
@@ -120,10 +121,17 @@ async def cb_adm_delete(callback: CallbackQuery, is_admin: bool):
         await callback.answer("⛔ Эту позицию удалять нельзя, она используется в главном меню как ключевая!", show_alert=True)
         return
     if item_name in inventory:
+        # Сохраняем данные позиции для возможного отката
+        item_data = inventory[item_name]
+        log_service.add_log(
+            callback.from_user.id, 
+            users_db.get(callback.from_user.id, "Админ"), 
+            f"удалил(а) позицию «{item_name}»",
+            snapshot={"undo_type": "delete", "name": item_name, "data": item_data}
+        )
         del inventory[item_name]
         save_state()
         await callback.answer(f"🗑 Позиция {item_name} удалена!", show_alert=True)
-    await callback.message.edit_text("✏️ <b>Изменить позиции</b>\nВыберите категорию:", reply_markup=get_adm_categories_menu(), parse_mode="HTML")
 
 @router.callback_query(F.data.startswith("adm_rename_"))
 async def cb_adm_rename(callback: CallbackQuery, state: FSMContext, is_admin: bool):
@@ -145,53 +153,73 @@ async def cb_adm_rename(callback: CallbackQuery, state: FSMContext, is_admin: bo
 @router.message(AdminEditStates.waiting_for_new_name)
 async def process_adm_rename(message: Message, state: FSMContext, is_admin: bool):
     if not is_admin: return
+
+    # П.2: защита от не-текстовых сообщений (фото, стикеры и т.п.)
+    if not message.text:
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_adm_action")]])
+        await message.answer("⚠️ Пожалуйста, отправьте текстовое сообщение с названием.", reply_markup=kb)
+        return
+
     new_name = message.text.strip()
+
+    # П.3: защита от пустого названия
+    if not new_name:
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_adm_action")]])
+        await message.answer("⚠️ Название не может быть пустым. Введите корректное название:", reply_markup=kb)
+        return
+
     data = await state.get_data()
     old_name = data.get("old_name")
     prompt_msg_id = data.get("prompt_msg_id")
-    
+
     keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_adm_action")]])
-    
+
     if new_name == old_name:
         await message.bot.edit_message_text(
-            chat_id=message.chat.id, message_id=prompt_msg_id, 
-            text=f"❌ Вы ввели то же самое название.\n\nВведите <b>новое название</b>:", 
+            chat_id=message.chat.id, message_id=prompt_msg_id,
+            text=f"❌ Вы ввели то же самое название.\n\nВведите <b>новое название</b>:",
             reply_markup=keyboard, parse_mode="HTML"
         )
         try: await message.delete()
         except Exception: pass
         return
-        
+
     if new_name in inventory:
         await message.bot.edit_message_text(
-            chat_id=message.chat.id, message_id=prompt_msg_id, 
-            text=f"❌ Позиция с таким названием уже существует!\n\nВведите <b>другое название</b>:", 
+            chat_id=message.chat.id, message_id=prompt_msg_id,
+            text=f"❌ Позиция с таким названием уже существует!\n\nВведите <b>другое название</b>:",
             reply_markup=keyboard, parse_mode="HTML"
         )
         try: await message.delete()
         except Exception: pass
         return
-        
+
     if old_name in inventory:
+        log_service.add_log(
+            message.from_user.id,
+            users_db.get(message.from_user.id, "Админ"),
+            f"переименовал(а) «{old_name}» → «{new_name}»",
+            snapshot={"undo_type": "rename", "old_name": old_name, "new_name": new_name}
+        )
         inventory[new_name] = inventory.pop(old_name)
         save_state()
-    
+
     await state.clear()
     try: await message.delete()
     except Exception: pass
-    
+
     user_id = message.from_user.id
     user_name = users_db.get(user_id, "Сотрудник")
     is_full = is_admin
     text = f"✅ Название изменено на <b>{new_name}</b>!\n\n" + get_main_menu_text(inventory, is_full, user_name)
-    
+
     if prompt_msg_id:
         try:
             await message.bot.edit_message_text(chat_id=message.chat.id, message_id=prompt_msg_id, text=text, reply_markup=get_main_menu(is_full), parse_mode="HTML")
             return
         except Exception:
             pass
-            
+
     msg = await message.answer(text, reply_markup=get_main_menu(is_full), parse_mode="HTML")
     last_menu_messages[user_id] = msg.message_id
 
@@ -214,47 +242,64 @@ async def cb_adm_add(callback: CallbackQuery, state: FSMContext, is_admin: bool)
 @router.message(AdminEditStates.waiting_for_new_item_name)
 async def process_adm_add_name(message: Message, state: FSMContext, is_admin: bool):
     if not is_admin: return
+
+    # П.2: защита от не-текстовых сообщений
+    if not message.text:
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_adm_action")]])
+        await message.answer("⚠️ Пожалуйста, отправьте текстовое сообщение с названием.", reply_markup=kb)
+        return
+
     new_name = message.text.strip()
-    
+
+    # П.3: защита от пустого названия
+    if not new_name:
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_adm_action")]])
+        await message.answer("⚠️ Название не может быть пустым. Введите корректное название:", reply_markup=kb)
+        return
+
     data = await state.get_data()
     prompt_msg_id = data.get("prompt_msg_id")
     keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_adm_action")]])
-    
+
     if new_name in inventory:
         await message.bot.edit_message_text(
-            chat_id=message.chat.id, message_id=prompt_msg_id, 
-            text="❌ Позиция с таким названием уже существует!\n\nВведите <b>другое название</b>:", 
+            chat_id=message.chat.id, message_id=prompt_msg_id,
+            text="❌ Позиция с таким названием уже существует!\n\nВведите <b>другое название</b>:",
             reply_markup=keyboard, parse_mode="HTML"
         )
         try: await message.delete()
         except Exception: pass
         return
-        
+
     await state.update_data(new_name=new_name)
     await state.set_state(AdminEditStates.waiting_for_new_item_qty)
-    
+
     try: await message.delete()
     except Exception: pass
-    
+
     text = f"Позиция: <b>{new_name}</b>\n\nВведите <b>количество</b> (число):"
-    
+
     if prompt_msg_id:
         try:
             await message.bot.edit_message_text(chat_id=message.chat.id, message_id=prompt_msg_id, text=text, reply_markup=keyboard, parse_mode="HTML")
             return
         except Exception:
             pass
-            
+
     await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
 
 @router.message(AdminEditStates.waiting_for_new_item_qty)
 async def process_adm_add_qty(message: Message, state: FSMContext, is_admin: bool):
-    if not is_admin: return
+    if not message.text:
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_adm_action")]])
+        await message.answer("⚠️ Пожалуйста, отправьте число.", reply_markup=kb)
+        return
     try:
         qty = float(message.text.replace(",", "."))
-        if qty < 0: raise ValueError
+        if not math.isfinite(qty) or qty < 0: raise ValueError
     except ValueError:
-        await message.answer("⚠️ Введите корректное число (0 или больше):")
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_adm_action")]])
+        await message.answer("⚠️ Введите корректное число (0 или больше):", reply_markup=kb)
         return
     
     data = await state.get_data()
@@ -311,11 +356,16 @@ async def process_adm_add_qty(message: Message, state: FSMContext, is_admin: boo
 @router.message(AdminEditStates.waiting_for_new_item_display)
 async def process_adm_add_display(message: Message, state: FSMContext, is_admin: bool):
     if not is_admin: return
+    if not message.text:
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_adm_action")]])
+        await message.answer("⚠️ Пожалуйста, отправьте число.", reply_markup=kb)
+        return
     try:
         val = float(message.text.replace(",", "."))
-        if val < 0: raise ValueError
+        if not math.isfinite(val) or val < 0: raise ValueError
     except ValueError:
-        await message.answer("⚠️ Введите корректное число (0 или больше):")
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_adm_action")]])
+        await message.answer("⚠️ Введите корректное число (0 или больше):", reply_markup=kb)
         return
     
     data = await state.get_data()
@@ -323,6 +373,12 @@ async def process_adm_add_display(message: Message, state: FSMContext, is_admin:
     prompt_msg_id = data.get("prompt_msg_id")
     
     inventory[new_name]["display_qty"] = val
+    log_service.add_log(
+        message.from_user.id,
+        users_db.get(message.from_user.id, "Админ"),
+        f"добавил(а) новую позицию «{new_name}»",
+        snapshot={"undo_type": "add", "name": new_name}
+    )
     save_state()
     await state.clear()
     

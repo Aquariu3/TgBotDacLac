@@ -37,16 +37,30 @@ async def _wizard_show_step(bot: Bot, state: FSMContext, chat_id: int):
     if current_item is None:
         await _wizard_finish(bot, state, chat_id)
         return
+
+    # П.11: если позицию удалили во время мастера — пропускаем её и идём дальше,
+    # иначе all_keys.index() ниже упадёт с ValueError.
+    if current_item not in inventory:
+        data["current_item"] = get_next_item(data)
+        await state.update_data(data)
+        if data["current_item"] is None:
+            await _wizard_finish(bot, state, chat_id)
+            return
+        current_item = data["current_item"]
+
     all_keys = list(inventory.keys())
     total = len(all_keys)
     idx = all_keys.index(current_item) + 1
     item_data = inventory[current_item]
     is_dessert = item_data.get("is_dessert")
-    unit = item_data.get("unit", "шт")  # <--- ДОБАВИЛИ ЕДИНИЦУ ИЗМЕРЕНИЯ
-    
-    cat_text = f" | Блок: {CATEGORY_NAMES.get(data['active_category'])}" if data.get("active_category") else ""
+    unit = item_data.get("unit", "шт")
+
+    # П.11 (доп.): .get(None) вернёт None — используем только если ключ есть
+    cat_name = CATEGORY_NAMES.get(data.get("active_category")) if data.get("active_category") else None
+    cat_text = f" | Блок: {cat_name}" if cat_name else ""
+
     if is_dessert:
-        current_val_text = f"всего <i>{item_data['qty']}</i> {unit}, витрина <i>{item_data['display_qty']}</i>"
+        current_val_text = f"всего <i>{item_data['qty']}</i> {unit}, витрина <i>{item_data.get('display_qty', 0)}</i>"
         instruction = "✍️ Введите <b>общее количество</b> ответным сообщением"
     else:
         current_val_text = f"<i>{item_data['qty']}</i> {unit}"

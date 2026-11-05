@@ -63,23 +63,35 @@ class IikoAsyncService:
         result = []
 
         async with self._get_client() as iiko:
-            response = await iiko.inventory.stock_balance.list(
-                balance_at=now_str,
-                organization_id=settings.IIKO_ORG_ID,
-                store_ids=[settings.IIKO_STORE_ID],
-                limit=1000
-            )
-
             products = await self.get_nomenclature()
 
-            for item in getattr(response, "items", []):
-                item_dict = item.model_dump() if hasattr(item, 'model_dump') else item
-                item_id = item_dict.get('productId')
-                qty = float(item_dict.get('quantity', 0))
-                
-                if item_id in products and qty != 0:
-                    p = products[item_id]
-                    result.append({"name": p["name"], "qty": qty, "unit": p["unit"]})
+            offset = 0
+            limit = 1000
+            while True:
+                response = await iiko.inventory.stock_balance.list(
+                    balance_at=now_str,
+                    organization_id=settings.IIKO_ORG_ID,
+                    store_ids=[settings.IIKO_STORE_ID],
+                    limit=limit,
+                    offset=offset,
+                )
+
+                items = getattr(response, "items", []) or []
+                if not items:
+                    break
+
+                for item in items:
+                    item_dict = item.model_dump() if hasattr(item, 'model_dump') else item
+                    item_id = item_dict.get('productId')
+                    qty = float(item_dict.get('quantity', 0))
+
+                    if item_id in products and qty != 0:
+                        p = products[item_id]
+                        result.append({"name": p["name"], "qty": qty, "unit": p["unit"]})
+
+                if len(items) < limit:
+                    break
+                offset += limit
 
         return result
 

@@ -138,20 +138,26 @@ class IikoService:
         url = "https://api-ru.iiko.services/api/nomenclature/v2/assembly-chart/list"
         headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
         payload = {"dateFrom": today, "dateTo": tomorrow, "includePreparedCharts": True}
-        try:
-            resp = requests.post(url, json=payload, headers=headers, timeout=30)
-            if resp.status_code == 200:
-                return resp.json()
-            elif resp.status_code == 429:
-                print("⚠️ Лимит запросов iiko (429). Ждем 2 секунды и пробуем еще раз...")
-                time.sleep(2)
-                return self.sync_get_all_tech_cards(token)
-            else:
-                print(f"⚠️ Ошибка массового запроса техкарт: {resp.status_code} - {resp.text}")
+
+        for attempt in range(3):
+            try:
+                resp = requests.post(url, json=payload, headers=headers, timeout=30)
+                if resp.status_code == 200:
+                    return resp.json()
+                elif resp.status_code == 429:
+                    wait_time = 2 ** attempt  # 1, 2, 4 сек
+                    print(f"⚠️ Лимит запросов iiko (429). Ждём {wait_time} сек и пробуем снова...")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    print(f"⚠️ Ошибка массового запроса техкарт: {resp.status_code} - {resp.text}")
+                    return None
+            except Exception as e:
+                print(f"⚠️ Исключение при массовом запросе техкарт: {e}")
                 return None
-        except Exception as e:
-            print(f"⚠️ Исключение при массовом запросе техкарт: {e}")
-            return None
+
+        print("⚠️ Не удалось получить техкарты после 3 попыток (429).")
+        return None
 
     def sync_get_tech_card_by_id(self, token, product_id):
         url = "https://api-ru.iiko.services/api/nomenclature/v2/assembly-chart/list"

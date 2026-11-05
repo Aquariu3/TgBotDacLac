@@ -233,24 +233,73 @@ async def cb_admin_users(callback: CallbackQuery, is_manager: bool):
             uname = users_db.get(uid, str(uid))
             collected_count = len(p_data.get("collected_data", {}))
             text += f"• <b>{uname}</b> (заполнено {collected_count} из {len(inventory)})\n"
+    
     text += "\n<b>📋 Последние действия:</b>\n"
     if not log_service.logs:
         text += "• <i>Пока нет действий</i>\n"
     else:
         for log in reversed(log_service.logs[-10:]):
             text += f"• [{log['time']}] <b>{log['user_name']}</b> — {log['action']}\n"
+
+    # Группируем действия по пользователям для кнопок
     buttons = []
-    for log in reversed(log_service.logs[-10:]):
-        if log.get("snapshot") is not None:
-            label = "черновик" if "черновик" in log["action"] else "отправку" if "отправил" in log["action"] else "данные"
-            buttons.append([InlineKeyboardButton(text=f"👁 Посмотреть {label} ({log['user_name']})", callback_data=f"view_log_{log['id']}")])
+    recent_logs = list(reversed(log_service.logs[-20:])) # берем последние 20 действий для кнопок
+    user_actions = {}
+    for log in recent_logs:
+        uid = log.get("user_id")
+        if uid not in user_actions:
+            user_actions[uid] = {"name": log.get("user_name", "Сотрудник"), "count": 0}
+        user_actions[uid]["count"] += 1
+
+    for uid, data in user_actions.items():
+        buttons.append([InlineKeyboardButton(
+            text=f"👤 {data['name']} ({data['count']} действ.)", 
+            callback_data=f"history_user_{uid}"
+        )])
+
     buttons.append([InlineKeyboardButton(text="🔄 Обновить", callback_data="admin_users")])
     buttons.append([InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin_panel")])
     keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+    
     try:
         await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
     except TelegramBadRequest as e:
         if "message is not modified" in str(e): pass
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("history_user_"))
+async def cb_history_user(callback: CallbackQuery, is_manager: bool):
+    if not is_manager: 
+        await callback.message.delete()
+        await callback.answer()
+        return
+        
+    uid = int(callback.data.replace("history_user_", ""))
+    
+    # Берем все логи этого пользователя
+    user_logs = [l for l in log_service.logs if l.get("user_id") == uid]
+    
+    if not user_logs:
+        await callback.answer("У этого пользователя нет истории.", show_alert=True)
+        return
+        
+    user_name = user_logs[-1].get("user_name", "Сотрудник")
+    text = f"👤 <b>История действий: {user_name}</b>\n\n"
+    
+    buttons = []
+    for log in reversed(user_logs):
+        text += f"• [{log['time']}] {log['action']}\n"
+        if log.get("snapshot") is not None:
+            label = "черновик" if "черновик" in log["action"] else "отправил" if "отправил" in log["action"] else "данные"
+            buttons.append([InlineKeyboardButton(
+                text=f"👁 Посмотреть {label} ({log['time']})", 
+                callback_data=f"view_log_{log['id']}_{uid}"
+            )])
+            
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад к пользователям", callback_data="admin_users")])
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+    
+    await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
     await callback.answer()
 
 @router.callback_query(F.data.startswith("view_log_"))
@@ -259,24 +308,101 @@ async def cb_view_log(callback: CallbackQuery, is_manager: bool):
         await callback.message.delete()
         await callback.answer()
         return
-    log_id = int(callback.data.replace("view_log_", ""))
+        
+    parts = callback.data.split("_")
+    log_id = int(parts[2])
+    user_id_back = int(parts[3]) if len(parts) > 3 else None # ID пользователя для кнопки "Назад"
+
     log_entry = next((l for l in log_service.logs if l["id"] == log_id), None)
     if not log_entry or not log_entry["snapshot"]:
         await callback.answer("❌ Данные не найдены или устарели.", show_alert=True)
         return
+    
     text = f"📄 <b>Детали действия</b>\n"
     text += f"Сотрудник: <b>{log_entry['user_name']}</b>\n"
     text += f"Действие: {log_entry['action']}\n"
     text += f"Время: {log_entry['time']}\n\n"
     text += "<b>Введенные данные:</b>\n"
     for name, val in log_entry["snapshot"].items():
-        if isinstance(val, dict):
+        if name == "undo_type": continue # скрываем служебную инфу
+        if isinstance(val, dict) and "qty" in val:
             text += f"• {name}: всего <b>{val.get('qty')}</b>, витрина <b>{val.get('display_qty')}</b>\n"
+        elif isinstance(val, dict):
+            text += f"• {name}: <i>(сложные данные)</i>\n"
         else:
             text += f"• {name}: <b>{val}</b>\n"
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад в историю", callback_data="admin_users")]])
+            
+    buttons = []
+    if isinstance(log_entry.get("snapshot"), dict) and log_entry["snapshot"].get("undo_type"):
+        buttons.append([InlineKeyboardButton(text="↩️ Отменить это действие", callback_data=f"undo_{log_id}")])
+    
+    back_cb = f"history_user_{user_id_back}" if user_id_back else "admin_users"
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=back_cb)])
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
     await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
     await callback.answer()
+
+@router.callback_query(F.data.startswith("undo_"))
+async def cb_undo_action(callback: CallbackQuery, is_manager: bool):
+    if not is_manager:
+        await callback.message.delete()
+        await callback.answer()
+        return
+
+    log_id = int(callback.data.replace("undo_", ""))
+    log_entry = next((l for l in log_service.logs if l["id"] == log_id), None)
+    
+    if not log_entry or not log_entry.get("snapshot") or not isinstance(log_entry["snapshot"], dict):
+        await callback.answer("❌ Данные для отката не найдены.", show_alert=True)
+        return
+
+    snap = log_entry["snapshot"]
+    undo_type = snap.get("undo_type")
+
+    if not undo_type:
+        await callback.answer("❌ Это действие нельзя отменить.", show_alert=True)
+        return
+
+    try:
+        if undo_type == "delete":
+            item_name = snap["name"]
+            item_data = snap["data"]
+            if item_name in inventory:
+                await callback.answer("❌ Позиция с таким названием уже существует.", show_alert=True)
+                return
+            inventory[item_name] = item_data
+            
+        elif undo_type == "rename":
+            old_name = snap["old_name"]
+            new_name = snap["new_name"]
+            if new_name not in inventory:
+                await callback.answer("❌ Позиция уже удалена, откат невозможен.", show_alert=True)
+                return
+            if old_name in inventory:
+                await callback.answer("❌ Позиция со старым названием уже существует.", show_alert=True)
+                return
+            inventory[old_name] = inventory.pop(new_name)
+            
+        elif undo_type == "add":
+            item_name = snap["name"]
+            if item_name in inventory:
+                del inventory[item_name]
+            else:
+                await callback.answer("❌ Позиция уже удалена.", show_alert=True)
+                return
+        
+        save_state()
+        
+        # Защищаем от повторного отката, удаляя метку undo_type из лога
+        snap["undo_type"] = None
+        log_service.repo.save_logs(log_service.logs)
+        
+        await callback.answer("✅ Действие успешно отменено!", show_alert=True)
+        await cb_admin_users(callback, is_manager=is_manager) # Возвращаем в историю
+        
+    except Exception as e:
+        await callback.answer(f"❌ Ошибка при откате: {e}", show_alert=True)
 
 @router.callback_query(F.data == "admin_notify")
 async def cb_admin_notify(callback: CallbackQuery, is_manager: bool):

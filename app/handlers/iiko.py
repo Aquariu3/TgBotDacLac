@@ -77,6 +77,8 @@ async def cb_iiko_current_stock(callback: CallbackQuery, is_manager: bool, skip_
         try:
             stock_data = await iiko_async_service.get_stock_balance()
             iiko_service.iiko_stock_cache = stock_data
+            # Обновляем метку — её показывает /health как "последний запрос остатков"
+            iiko_service.iiko_cache_time = datetime.now()
         except Exception as e:
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🔄 Повторить", callback_data="iiko_current_stock")],
@@ -116,6 +118,9 @@ async def cb_iiko_refresh_stock(callback: CallbackQuery, is_manager: bool):
     try: await callback.answer("Обновляем...")
     except Exception: pass
     
+    # Обнуляем именно тот кэш, по которому cb_iiko_current_stock решает,
+    # что данные "свежие" и не идёт в iiko повторно.
+    iiko_service.iiko_stock_cache = []
     iiko_service.iiko_cache_time = None
     await cb_iiko_current_stock(callback, is_manager=is_manager, skip_answer=True)
 
@@ -170,6 +175,12 @@ async def cb_iiko_movements(callback: CallbackQuery, is_manager: bool):
         
         sales = await asyncio.to_thread(iiko_service.sync_get_documents, token, "sales_document")
         writeoffs = await asyncio.to_thread(iiko_service.sync_get_documents, token, "writeoff_document")
+                # iiko может вернуть как list, так и dict с ключом "items" — приводим к list
+        if isinstance(sales, dict):
+            sales = sales.get("items", [])
+        if isinstance(writeoffs, dict):
+            writeoffs = writeoffs.get("items", [])
+
 
         total_revenue = 0.0
         grouped_sales = {}  
@@ -262,8 +273,21 @@ async def cb_iiko_movements(callback: CallbackQuery, is_manager: bool):
         if not grouped_sales and not direct_writeoffs:
             text += "<i>Движений не найдено.</i>"
 
-        if len(text) > 4000:
-            text = text[:3900] + "...\n\n<i>(Слишком много позиций, список обрезан)</i>"
+               # Безопасная обрезка: режем по строкам, чтобы не разорвать HTML-теги.
+        # В этой функции каждый <b>...</b> находится внутри одной строки,
+        # поэтому обрезка по \n гарантированно не ломает разметку.
+        MAX_LEN = 3800
+        if len(text) > MAX_LEN:
+            lines = text.split("\n")
+            truncated = []
+            current_len = 0
+            for line in lines:
+                line_len = len(line) + 1  # +1 за \n
+                if current_len + line_len > MAX_LEN:
+                    break
+                truncated.append(line)
+                current_len += line_len
+            text = "\n".join(truncated) + "\n\n<i>(Слишком много позиций, список обрезан)</i>"
 
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🔄 Обновить", callback_data="iiko_movements")],
