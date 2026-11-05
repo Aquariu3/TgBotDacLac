@@ -1,11 +1,20 @@
 import asyncio
 import logging
+import logging.handlers
+import os
+
 from aiogram import Bot, Dispatcher
-from app.config import settings
+from app.config import settings, DATA_DIR
 from app.handlers import setup_routers
 
-# Добавляем last_menu_messages в импорт
-from app.state import users_db, user_progress, inventory, ADMIN_ID, admin_ids, manager_ids, save_state, notification_service, last_menu_messages
+# Импорты из состояния
+from app.state import (
+    users_db, user_progress, inventory, ADMIN_ID, 
+    admin_ids, manager_ids, save_state, _save_state_sync, 
+    notification_service, last_menu_messages
+)
+
+# Импорты для меню
 from app.texts.messages import get_main_menu_text
 from app.keyboards.main_kb import get_main_menu
 
@@ -79,7 +88,7 @@ async def on_shutdown(bot: Bot):
         except Exception:
             pass
             
-    save_state()
+    _save_state_sync()  # Ждём, пока всё гарантированно запишется на диск
     logging.info("Все данные успешно сохранены. Бот остановлен.")
 
 def create_bot() -> Bot:
@@ -93,7 +102,27 @@ def create_dispatcher() -> Dispatcher:
     return dp
 
 async def main() -> None:
-    logging.basicConfig(level=logging.INFO)
+        # --- НАСТРОЙКА ЛОГИРОВАНИЯ ---
+    log_file = os.path.join(DATA_DIR, "bot.log")
+    
+    # Создаем обработчик, который пишет в файл и делает ротацию каждую полночь
+    file_handler = logging.handlers.TimedRotatingFileHandler(
+        log_file, when="midnight", interval=1, backupCount=7, encoding="utf-8"
+    )
+    
+    # Формат сообщений в файле
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    file_handler.setFormatter(formatter)
+    
+    # Применяем настройки: пишем И в консоль, И в файл
+    logging.basicConfig(
+        level=logging.INFO,
+        handlers=[
+            logging.StreamHandler(),  # Вывод в терминал (как раньше)
+            file_handler              # Вывод в data/bot.log
+        ]
+    )
+    # -----------------------------
     bot = create_bot()
     dp = create_dispatcher()
     try:

@@ -1,6 +1,7 @@
 import os
 import json
 import threading
+import asyncio
 
 from app.config import settings, DATA_DIR
 from app.repositories.base import JsonRepository
@@ -51,12 +52,8 @@ last_menu_messages = {}
 admin_ids = {ADMIN_ID}
 manager_ids = set()
 
-def save_state():
-    """Сохраняет всё состояние в JSON-файлы атомарно.
-
-    Блокировка нужна, чтобы два одновременных вызова не перемешали записи.
-    Внутри каждого save() ещё есть своя per-file блокировка — это второй уровень защиты.
-    """
+def _save_state_sync():
+    """Синхронная запись на диск (выполняется в фоновом потоке)."""
     with _save_state_lock:
         inventory_repo.save_inventory(inventory)
         users_repo.save_users(users_db)
@@ -64,6 +61,18 @@ def save_state():
         last_messages_repo.save(last_menu_messages)
         admins_repo.save(list(admin_ids))
         managers_repo.save(list(manager_ids))
+
+
+def save_state():
+    """Неблокирующее сохранение в фоновом потоке.
+    Если цикл событий запущен (внутри бота) — отправляет задачу в фон.
+    Если его нет (например, при импорте) — сохраняет синхронно.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(asyncio.to_thread(_save_state_sync))
+    except RuntimeError:
+        _save_state_sync()
 
 def load_state():
     global inventory, users_db, user_progress, last_menu_messages, admin_ids, manager_ids
