@@ -8,6 +8,7 @@ import logging
 
 from app.state import inventory, users_db, user_progress, admin_ids, manager_ids, log_service, save_state, ADMIN_ID, last_menu_messages
 from app.states.states import InventoryStates
+from app.keyboards.main_kb import get_notification_keyboard
 from app.keyboards.admin_kb import (
     get_admin_panel_keyboard, 
     get_admin_other_keyboard, 
@@ -631,7 +632,6 @@ async def process_broadcast(message: Message, state: FSMContext, is_manager: boo
     target = data.get("notify_target")
     prompt_msg_id = data.get("prompt_msg_id")
     
-    # ФИКС #13: экранируем текст, чтобы невалидный HTML не сломал рассылку
     from html import escape
     text = escape(message.text)
     
@@ -644,15 +644,24 @@ async def process_broadcast(message: Message, state: FSMContext, is_manager: boo
     if prompt_msg_id:
         try: await message.bot.delete_message(chat_id=message.chat.id, message_id=prompt_msg_id)
         except Exception: pass
+        
     if target == "all":
         for uid in users_db.keys():
             if uid in admin_ids: continue
             try:
-                await message.bot.send_message(uid, notify_text, parse_mode="HTML")
+                # ФИКС: Добавили reply_markup с кнопкой "Хорошо"
+                await message.bot.send_message(
+                    uid, notify_text, 
+                    parse_mode="HTML", 
+                    reply_markup=get_notification_keyboard()
+                )
                 success_count += 1
             except TelegramBadRequest:
                 try:
-                    await message.bot.send_message(uid, notify_text)
+                    await message.bot.send_message(
+                        uid, notify_text, 
+                        reply_markup=get_notification_keyboard()
+                    )
                     success_count += 1
                 except Exception:
                     fail_count += 1
@@ -660,18 +669,29 @@ async def process_broadcast(message: Message, state: FSMContext, is_manager: boo
                 fail_count += 1
     else:
         try:
-            await message.bot.send_message(int(target), notify_text, parse_mode="HTML")
+            # ФИКС: Добавили reply_markup с кнопкой "Хорошо"
+            await message.bot.send_message(
+                int(target), notify_text, 
+                parse_mode="HTML", 
+                reply_markup=get_notification_keyboard()
+            )
             success_count += 1
         except TelegramBadRequest:
             try:
-                await message.bot.send_message(int(target), notify_text)
+                await message.bot.send_message(
+                    int(target), notify_text, 
+                    reply_markup=get_notification_keyboard()
+                )
                 success_count += 1
             except Exception:
                 fail_count += 1
         except Exception:
             fail_count += 1
+
     result = f"✅ <b>Уведомление отправлено!</b>\nУспешно доставлено: <b>{success_count}</b>."
     if fail_count:
         result += f"\nНе доставлено: <b>{fail_count}</b> (заблокировали бота)."
     
-    await message.answer(result, reply_markup=get_admin_panel_keyboard(True), parse_mode="HTML")
+    # ФИКС: Запоминаем ID новой панели, чтобы бот удалил её при выключении
+    msg = await message.answer(result, reply_markup=get_admin_panel_keyboard(True), parse_mode="HTML")
+    last_menu_messages[message.from_user.id] = msg.message_id

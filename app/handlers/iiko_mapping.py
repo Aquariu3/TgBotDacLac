@@ -163,6 +163,35 @@ async def process_iiko_search(message: Message, state: FSMContext, is_manager: b
     if not edited:
         msg = await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
         await state.update_data(prompt_msg_id=msg.message_id)
+
+async def _save_mapping_and_show(callback: CallbackQuery, state: FSMContext, iiko_id: str):
+    data = await state.get_data()
+    local_name = data.get("map_local_name")
+    if not local_name: 
+        return await callback.answer("❌ Сессия устарела.", show_alert=True)
+    
+    iiko_mappings[local_name] = iiko_id
+    save_state()
+    
+    products = await iiko_async_service.get_nomenclature()
+    iiko_name = products.get(iiko_id, {}).get("name", "Неизвестно")
+    await state.clear()
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Хорошо", callback_data="admin_mapping")]])
+    try: 
+        await callback.message.edit_text(
+            f"✅ Успешно!\nПозиция <b>{local_name}</b> теперь связана с iiko <b>{iiko_name}</b>.", 
+            reply_markup=keyboard, 
+            parse_mode="HTML"
+        )
+    except Exception: 
+        await callback.message.answer(
+            f"✅ Успешно!\nПозиция <b>{local_name}</b> теперь связана с iiko <b>{iiko_name}</b>.", 
+            reply_markup=keyboard, 
+            parse_mode="HTML"
+        )
+    await callback.answer()
+
         
 @router.callback_query(F.data.startswith("map_save_"))
 async def cb_map_save(callback: CallbackQuery, state: FSMContext, is_manager: bool):
