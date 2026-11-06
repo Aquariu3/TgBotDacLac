@@ -1,4 +1,5 @@
 import logging
+from html import escape
 from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -51,13 +52,26 @@ async def cmd_start(message: Message, state: FSMContext, is_super: bool, is_mana
 
 @router.message(InventoryStates.waiting_for_reg_name)
 async def process_registration(message: Message, state: FSMContext, is_super: bool, is_manager: bool, is_admin: bool):
+    # ФИКС #31: если пользователь уже зарегистрирован — не перезаписываем имя молча
+    if message.from_user.id in users_db:
+        await state.clear()
+        await message.answer("Вы уже зарегистрированы. Нажмите /start, чтобы открыть меню.")
+        return
+
     if not message.text:
         await message.answer("⚠️ Пожалуйста, отправьте текстовое сообщение с вашим именем.")
         return
-    full_name = message.text.strip()
-    if len(full_name.split()) < 2:
+    full_name_raw = message.text.strip()
+    if len(full_name_raw.split()) < 2:
         await message.answer("⚠️ Пожалуйста, введите корректно Фамилию и Имя (например: <i>Иванов Иван</i>):", parse_mode="HTML")
         return
+    if len(full_name_raw) > 60:
+        await message.answer("⚠️ Имя слишком длинное. Максимум 60 символов.")
+        return
+
+    # ФИКС #12: экранируем HTML — чтобы имя не сломало меню с parse_mode="HTML"
+    full_name = escape(full_name_raw)
+
     user_id = message.from_user.id
     users_db[user_id] = full_name
     
@@ -83,13 +97,15 @@ async def cb_main_menu(callback: CallbackQuery, state: FSMContext, is_super: boo
     
     text = f"Рад видеть вас снова, <b>{user_name}</b>!\n\n{role_text}\n\n" + get_main_menu_text(inventory, has_access, user_name)
     
+    # ФИКС #2: если меню уже такое — используем текущее сообщение,
+    # иначе msg оставался неинициализированным → UnboundLocalError
+    msg = callback.message
     try:
         msg = await callback.message.edit_text(text, reply_markup=get_main_menu(has_access), parse_mode="HTML")
     except TelegramBadRequest as e:
-        if "message is not modified" in str(e):
-            pass
-        else:
+        if "message is not modified" not in str(e):
             msg = await callback.message.answer(text, reply_markup=get_main_menu(has_access), parse_mode="HTML")
+        # если "not modified" — msg остаётся callback.message, всё ок
     except Exception as e:
         logging.warning(f"Не удалось отредактировать главное меню, отправляем новое: {e}")
         msg = await callback.message.answer(text, reply_markup=get_main_menu(has_access), parse_mode="HTML")

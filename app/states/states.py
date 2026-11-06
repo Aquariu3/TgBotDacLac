@@ -15,4 +15,4 @@ class AdminEditStates(StatesGroup):
     waiting_for_food_type = State()
     waiting_for_new_name = State()
     waiting_for_iiko_search = State()
-    waiting_for_sales_period = State() # <-- НОВОЕ СОСТОЯНИЕ
+    waiting_for_sales_period = State() 

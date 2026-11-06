@@ -67,8 +67,13 @@ class NotificationService:
             except TelegramBadRequest as e:
                 if "message is not modified" in str(e): return admin_msg_id
                 logging.warning(f"TelegramBadRequest при обновлении прогресса: {e}")
+                # ФИКС #30: если отредактировать нельзя — удаляем старое сообщение, чтобы не плодить дубли
+                try: await bot.delete_message(admin_id, admin_msg_id)
+                except Exception: pass
             except Exception as e:
                 logging.warning(f"Ошибка при обновлении прогресса: {e}")
+                try: await bot.delete_message(admin_id, admin_msg_id)
+                except Exception: pass
                 
         try:
             msg = await bot.send_message(chat_id=admin_id, text=text, parse_mode="HTML", reply_markup=get_notification_keyboard())

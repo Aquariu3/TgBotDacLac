@@ -1,20 +1,38 @@
 import asyncio
 import logging
 import math
-from datetime import datetime
+import time
+from datetime import datetime, timedelta, date
 import difflib
 from aiogram.exceptions import TelegramBadRequest
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
-from datetime import datetime, timedelta, date
 
 from aiogram.fsm.context import FSMContext
-from app.state import iiko_service, admin_ids, manager_ids, iiko_async_service, ADMIN_ID, inventory, iiko_mappings, save_state
+# Стало:
+from app.state import iiko_service, admin_ids, manager_ids, iiko_async_service, ADMIN_ID, inventory, iiko_mappings, save_state, find_item_by_hash
 from app.states.states import AdminEditStates
 from app.domain.constants import MAIN_KEYWORDS
 from app.keyboards.admin_kb import get_iiko_menu
+from app.text_utils import make_item_hash
 
 router = Router()
+
+# ФИКС #23: кэш продаж/списаний по дням, чтобы не дёргать iiko лишний раз
+_sales_cache: dict[str, tuple[float, dict]] = {}
+SALES_CACHE_TTL = 300  # 5 минут
+
+def _cache_get(key: str):
+    if key in _sales_cache:
+        ts, data = _sales_cache[key]
+        if time.time() - ts < SALES_CACHE_TTL:
+            return data
+        _sales_cache.pop(key, None)
+    return None
+
+def _cache_set(key: str, data):
+    _sales_cache[key] = (time.time(), data)
+
 
 @router.callback_query(F.data == "iiko_view")
 async def cb_iiko_view(callback: CallbackQuery, is_manager: bool, skip_answer=False):
@@ -90,7 +108,6 @@ async def cb_iiko_current_stock(callback: CallbackQuery, is_manager: bool, skip_
         try:
             stock_data = await iiko_async_service.get_stock_balance()
             iiko_service.iiko_stock_cache = stock_data
-            # Обновляем метку — её показывает /health как "последний запрос остатков"
             iiko_service.iiko_cache_time = datetime.now()
         except Exception as e:
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -131,8 +148,6 @@ async def cb_iiko_refresh_stock(callback: CallbackQuery, is_manager: bool):
     try: await callback.answer("Обновляем...")
     except Exception: pass
     
-    # Обнуляем именно тот кэш, по которому cb_iiko_current_stock решает,
-    # что данные "свежие" и не идёт в iiko повторно.
     iiko_service.iiko_stock_cache = []
     iiko_service.iiko_cache_time = None
     await cb_iiko_current_stock(callback, is_manager=is_manager, skip_answer=True)
@@ -179,7 +194,6 @@ async def cb_sales_menu(callback: CallbackQuery, state: FSMContext, is_manager: 
     today = date.today()
     buttons = []
     
-    # Генерируем кнопки для последних 7 дней
     for i in range(7):
         d = today - timedelta(days=i)
         if i == 0:
@@ -224,6 +238,8 @@ async def process_sales_period(message: Message, state: FSMContext, is_manager: 
     if not is_manager: return
     
     if not message.text:
+        try: await message.delete()
+        except Exception: pass
         await message.answer("⚠️ Отправьте текст с датами.")
         return
         
@@ -231,6 +247,8 @@ async def process_sales_period(message: Message, state: FSMContext, is_manager: 
     parts = text.split("-")
     
     if len(parts) != 2:
+        try: await message.delete() # <-- УДАЛЯЕМ ошибочное сообщение
+        except Exception: pass
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Хорошо", callback_data="sales_period_start")]])
         await message.answer("⚠️ Неверный формат. Введите две даты через дефис (например: <code>01.11.2026-05.11.2026</code>)", reply_markup=kb, parse_mode="HTML")
         return
@@ -239,11 +257,15 @@ async def process_sales_period(message: Message, state: FSMContext, is_manager: 
         start_date = datetime.strptime(parts[0], "%d.%m.%Y").date()
         end_date = datetime.strptime(parts[1], "%d.%m.%Y").date()
     except ValueError:
+        try: await message.delete() # <-- УДАЛЯЕМ ошибочное сообщение
+        except Exception: pass
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Хорошо", callback_data="sales_period_start")]])
         await message.answer("⚠️ Не удалось распознать даты. Проверьте формат (ДД.ММ.ГГГГ).", reply_markup=kb)
         return
         
     if start_date > end_date:
+        try: await message.delete() # <-- УДАЛЯЕМ ошибочное сообщение
+        except Exception: pass
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Хорошо", callback_data="sales_period_start")]])
         await message.answer("⚠️ Дата начала не может быть позже даты конца.", reply_markup=kb)
         return
@@ -262,18 +284,15 @@ async def process_sales_period(message: Message, state: FSMContext, is_manager: 
     )
 
 async def _render_sales_period_days(message: Message, start_str: str, end_str: str, page: int):
-    """Отрисовывает список дней выбранного периода по 7 штук на страницу."""
     start_date = datetime.strptime(start_str, "%Y-%m-%d").date()
     end_date = datetime.strptime(end_str, "%Y-%m-%d").date()
     
-    # Генерируем полный список всех дат в периоде
     all_dates = []
     current_date = start_date
     while current_date <= end_date:
         all_dates.append(current_date)
         current_date += timedelta(days=1)
         
-    # Пагинация: по 7 дней на страницу
     page_size = 7
     start_idx = page * page_size
     end_idx = start_idx + page_size
@@ -286,7 +305,6 @@ async def _render_sales_period_days(message: Message, start_str: str, end_str: s
             text=f"📅 {d.strftime('%d.%m.%Y')}", 
             callback_data=f"sales_custom_{d.strftime('%Y-%m-%d')}_{start_str}_{end_str}_{page}"
         )])
-    # Кнопки навигации (Назад / Далее)
     nav_row = []
     if page > 0:
         nav_row.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"sales_days_{start_str}_{end_str}_{page - 1}"))
@@ -315,7 +333,6 @@ async def cb_sales_days_nav(callback: CallbackQuery, is_manager: bool):
         await callback.answer()
         return
     
-    # Формат: sales_days_YYYY-MM-DD_YYYY-MM-DD_PAGE
     parts = callback.data.split("_")
     start_str = parts[2]
     end_str = parts[3]
@@ -332,14 +349,13 @@ async def cb_sales_show(callback: CallbackQuery, is_manager: bool):
         return
         
     cb_data = callback.data
+    back_cb = "sales_menu"
     
-    # Понимаем, откуда мы пришли
     if cb_data.startswith("sales_fast_"):
-        target_date_str = cb_data.replace("sales_fast_", "") # YYYY-MM-DD
-        back_cb = "sales_menu"
+        target_date_str = cb_data.replace("sales_fast_", "")
     else:
         parts = cb_data.replace("sales_custom_", "").split("_")
-        target_date_str = parts[0] # YYYY-MM-DD
+        target_date_str = parts[0]
         start_str = parts[1]
         end_str = parts[2]
         page = parts[3]
@@ -352,6 +368,12 @@ async def cb_sales_show(callback: CallbackQuery, is_manager: bool):
     
     await callback.message.edit_text(f"⏳ <b>Собираем данные за {display_date}...</b>\n\nПожалуйста, подождите.")
 
+    # ФИКС #14: инициализируем до try, чтобы не было UnboundLocalError
+    grouped_sales = {}
+    direct_writeoffs = {}
+    total_revenue = 0.0
+    sorted_groups = []
+
     try:
         token = await asyncio.to_thread(iiko_service.sync_get_token)
         if not token:
@@ -360,15 +382,22 @@ async def cb_sales_show(callback: CallbackQuery, is_manager: bool):
         product_map = await asyncio.to_thread(iiko_service.sync_get_products, token)
         groups_map = await asyncio.to_thread(iiko_service.sync_get_groups, token)
         
-        sales = await asyncio.to_thread(iiko_service.sync_get_documents, token, "sales_document", from_date=target_date_str)
-        writeoffs = await asyncio.to_thread(iiko_service.sync_get_documents, token, "writeoff_document", from_date=target_date_str)
+        # ФИКС #23: кэш продаж/списаний по дням
+        cache_key_sales = f"{target_date_str}_sales"
+        cache_key_writeoffs = f"{target_date_str}_writeoffs"
+
+        sales = _cache_get(cache_key_sales)
+        if sales is None:
+            sales = await asyncio.to_thread(iiko_service.sync_get_documents, token, "sales_document", from_date=target_date_str)
+            _cache_set(cache_key_sales, sales)
+
+        writeoffs = _cache_get(cache_key_writeoffs)
+        if writeoffs is None:
+            writeoffs = await asyncio.to_thread(iiko_service.sync_get_documents, token, "writeoff_document", from_date=target_date_str)
+            _cache_set(cache_key_writeoffs, writeoffs)
         
         if isinstance(sales, dict): sales = sales.get("items", [])
         if isinstance(writeoffs, dict): writeoffs = writeoffs.get("items", [])
-
-        total_revenue = 0.0
-        grouped_sales = {}  
-        direct_writeoffs = {}
 
         exclude_keywords = ["молоко", "сироп", "арахис", "лимон", "шот", "на вынос", "доп", "пудра", "корица", "маршмеллоу"]
 
@@ -494,6 +523,7 @@ async def cb_sales_show(callback: CallbackQuery, is_manager: bool):
             await callback.message.edit_text(f"❌ Ошибка: {e}", reply_markup=keyboard, parse_mode="HTML")
         except Exception:
             pass
+
 @router.callback_query(F.data == "estimated_stock")
 async def cb_estimated_stock(callback: CallbackQuery, is_manager: bool):
     if not is_manager:
@@ -521,8 +551,6 @@ async def cb_estimated_stock(callback: CallbackQuery, is_manager: bool):
         if isinstance(sales, dict):
             sales = sales.get("items", [])
 
-        # Собираем словарь: {название_блюда_в_нижнем_регистре: количество_продаж}
-                # Собираем продажи по ID и по названиям
         sold_items_by_id = {}
         sold_items_by_name = {}
         for doc in sales:
@@ -542,7 +570,13 @@ async def cb_estimated_stock(callback: CallbackQuery, is_manager: bool):
         from app.state import inventory
         from app.domain.constants import CATEGORY_NAMES
         
-        # Группируем для вывода
+        # ФИКС: считаем, сколько локальных позиций привязано к одному iiko_id.
+        # Если > 1 — значит, в iiko они объединены, и точный вычет невозможен.
+        mapped_count = {}
+        for local_name, iiko_id in iiko_mappings.items():
+            if local_name in inventory:
+                mapped_count[iiko_id] = mapped_count.get(iiko_id, 0) + 1
+        
         grouped = {}
         for name, data in inventory.items():
             cat = data.get("category", "other")
@@ -553,6 +587,7 @@ async def cb_estimated_stock(callback: CallbackQuery, is_manager: bool):
         text = f"📉 <b>Остатки с учетом продаж за {today_str}</b>\n\n"
         
         found_any_match = False
+        conflict_found = False
 
         for cat, items in grouped.items():
             cat_text = f"\n<b>{CATEGORY_NAMES.get(cat, cat)}</b>\n"
@@ -563,49 +598,59 @@ async def cb_estimated_stock(callback: CallbackQuery, is_manager: bool):
                 current_qty = float(data.get('qty', 0))
                 unit = data.get("unit", "шт")
                 
-                # Ищем совпадение в продажах
-                sold_qty = 0.0
+                curr_str = str(int(current_qty)) if current_qty.is_integer() else f"{current_qty:g}"
                 
-                # 1. Проверяем РУЧНУЮ СВЯЗЬ (маппинг)
+                sold_qty = 0.0
+                is_conflict = False
+                
                 mapped_id = iiko_mappings.get(name)
                 if mapped_id and mapped_id in sold_items_by_id:
-                    sold_qty = sold_items_by_id[mapped_id]
-                # 2. Если ручной связи нет, ищем точное совпадение по названию
+                    # Если к этому iiko_id привязано несколько локальных — не вычитаем
+                    if mapped_count.get(mapped_id, 0) > 1:
+                        is_conflict = True
+                        conflict_found = True
+                    else:
+                        sold_qty = sold_items_by_id[mapped_id]
                 elif local_name_lower in sold_items_by_name:
                     sold_qty = sold_items_by_name[local_name_lower]
                 else:
-                    # 3. Если точного нет, ищем частичное совпадение
+                    # Ищем только если локальное название ЯВЛЯЕТСЯ частью iiko.
+                    # Убрали обратную проверку, чтобы «Молоко» не вычиталось
+                    # из всех «Молоко 3.2%», «Молоко Кокос» и т.д.
                     for iiko_name, qty in sold_items_by_name.items():
-                        if local_name_lower in iiko_name or iiko_name in local_name_lower:
+                        if local_name_lower in iiko_name:
                             sold_qty += qty
                             found_any_match = True
                             break
                             
-                if sold_qty > 0:
+                if is_conflict:
+                    cat_text += f"• {name}: <b>{curr_str}</b> {unit} ⚠️ <i>(в iiko общая карточка — точный вычет невозможен)</i>\n"
+                    cat_added = True
+                elif sold_qty > 0:
                     found_any_match = True
                     remaining = current_qty - sold_qty
-                    if remaining < 0: remaining = 0.0 # Ушло в минус — ставим 0
+                    if remaining < 0: remaining = 0.0
                     
-                    # Красиво форматируем цифры (убираем .0 если целое)
-                    curr_str = str(int(current_qty)) if current_qty.is_integer() else f"{current_qty:g}"
                     rem_str = str(int(remaining)) if remaining.is_integer() else f"{remaining:g}"
                     sold_str = str(int(sold_qty)) if sold_qty.is_integer() else f"{sold_qty:g}"
                     
                     cat_text += f"• {name}: было {curr_str} -> осталось <b>{rem_str}</b> {unit} (продано {sold_str})\n"
                     cat_added = True
                 else:
-                    # Если продаж не было, показываем просто текущий остаток без изменений
-                    curr_str = str(int(current_qty)) if current_qty.is_integer() else f"{current_qty:g}"
                     cat_text += f"• {name}: <b>{curr_str}</b> {unit}\n"
                     cat_added = True
                     
             if cat_added:
                 text += cat_text
 
-        if not found_any_match:
+        if conflict_found:
+            text += (
+                "\n⚠️ <b>Внимание:</b> некоторые позиции в вашем складе привязаны к одной общей позиции в iiko. "
+                "Пока в iiko не разделены — точный расчёт для них невозможен, показан базовый остаток.\n"
+            )
+        elif not found_any_match:
             text += "\n<i>(Совпадений с продажами в iiko не найдено. Показаны базовые остатки)</i>\n"
 
-        # Обрезка длинного текста
         MAX_LEN = 3800
         if len(text) > MAX_LEN:
             text = text[:MAX_LEN] + "\n\n<i>(Список обрезан)</i>"
@@ -622,9 +667,11 @@ async def cb_estimated_stock(callback: CallbackQuery, is_manager: bool):
             [InlineKeyboardButton(text="⬅️ В главное меню", callback_data="main_menu")]
         ])
         await callback.message.edit_text(f"❌ Ошибка при расчете: {e}", reply_markup=keyboard, parse_mode="HTML")
-        # --- СОПОСТАВЛЕНИЕ (МАППИНГ) ---
 
-@router.callback_query(F.data.startswith("admin_mapping")) # Изменили фильтр для приема номеров страниц
+
+# --- СОПОСТАВЛЕНИЕ (МАППИНГ) ---
+
+@router.callback_query(F.data.startswith("admin_mapping"))
 async def cb_admin_mapping(callback: CallbackQuery, state: FSMContext, is_manager: bool):
     if not is_manager:
         await callback.message.delete()
@@ -632,14 +679,11 @@ async def cb_admin_mapping(callback: CallbackQuery, state: FSMContext, is_manage
         return
     await state.clear()
 
-    # Определяем, какую страницу открыть (по умолчанию 0)
-    if callback.data == "admin_mapping":
+    # ФИКС #27: убрал лишний if/else, просто try/except
+    try:
+        page = int(callback.data.split("_")[-1])
+    except (ValueError, IndexError):
         page = 0
-    else:
-        try:
-            page = int(callback.data.split("_")[-1])
-        except ValueError:
-            page = 0
 
     all_items = list(inventory.keys())
     items_per_page = 10
@@ -647,15 +691,17 @@ async def cb_admin_mapping(callback: CallbackQuery, state: FSMContext, is_manage
     end_idx = start_idx + items_per_page
     page_items = all_items[start_idx:end_idx]
     
-    # Считаем общее количество страниц (если позиций нет, будет 1 страница)
     total_pages = max(1, (len(all_items) + items_per_page - 1) // items_per_page)
 
     buttons = []
+    # ФИКС #1: используем хэш вместо сырого названия (лимит 64 байта на callback_data)
     for name in page_items:
         icon = "✅" if name in iiko_mappings else "❌"
-        buttons.append([InlineKeyboardButton(text=f"{icon} {name}", callback_data=f"map_local_{name}")])
+        buttons.append([InlineKeyboardButton(
+            text=f"{icon} {name}", 
+            callback_data=f"map_local_{make_item_hash(name)}"
+        )])
 
-    # Кнопки навигации (Назад / Далее)
     nav_row = []
     if page > 0:
         nav_row.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"admin_mapping_{page - 1}"))
@@ -680,11 +726,7 @@ async def cb_admin_mapping(callback: CallbackQuery, state: FSMContext, is_manage
     text += "Выберите позицию бота, которую хотите связать:"
 
     try:
-        await callback.message.edit_text(
-            text,
-            reply_markup=keyboard,
-            parse_mode="HTML"
-        )
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
     except TelegramBadRequest as e:
         if "message is not modified" not in str(e):
             logging.warning(f"Ошибка при обновлении меню сопоставления: {e}")
@@ -694,26 +736,24 @@ async def cb_admin_mapping(callback: CallbackQuery, state: FSMContext, is_manage
     await callback.answer()
 
 def find_best_iiko_matches(local_name: str, products: dict, limit: int = 3) -> list:
-    """Ищет наиболее похожие названия в iiko."""
     local_clean = local_name.lower().replace("(шт)", "").replace("(кг)", "").replace("(л)", "").replace("(уп)", "").strip()
+    # ФИКС #33: если после очистки пусто — сразу выходим (иначе пустая строка матчит всё)
+    if not local_clean:
+        return []
     matches = []
     
     for pid, p in products.items():
         iiko_name = p["name"]
         iiko_clean = iiko_name.lower().split('_')[0].strip()
         
-        # 1. Если одно название полностью содержится в другом — это отличное совпадение
         if local_clean in iiko_clean or iiko_clean in local_clean:
             score = 1.0
         else:
-            # 2. Иначе считаем процент схожести текста
             score = difflib.SequenceMatcher(None, local_clean, iiko_clean).ratio()
             
-        # Берем совпадения с похожестью от 50%
         if score >= 0.5:
             matches.append((score, pid, iiko_name))
             
-    # Сортируем по убыванию похожести и берем топ-N
     matches.sort(key=lambda x: x[0], reverse=True)
     return matches[:limit]
 
@@ -723,7 +763,12 @@ async def cb_map_local(callback: CallbackQuery, state: FSMContext, is_manager: b
         await callback.answer()
         return
     
-    local_name = callback.data.replace("map_local_", "")
+    item_hash = callback.data.replace("map_local_", "")
+    local_name = find_item_by_hash(item_hash)
+    if not local_name:
+        await callback.answer("Позиция не найдена (возможно, удалена).", show_alert=True)
+        return
+
     await state.update_data(map_local_name=local_name, prompt_msg_id=callback.message.message_id)
     
     await callback.message.edit_text(f"⏳ Ищу похожие позиции для <b>{local_name}</b> в базе iiko...", parse_mode="HTML")
@@ -732,30 +777,33 @@ async def cb_map_local(callback: CallbackQuery, state: FSMContext, is_manager: b
         products = await iiko_async_service.get_nomenclature()
         matches = find_best_iiko_matches(local_name, products)
         
+        buttons = []
+        
+        # ФИКС (Вариант 3): Кнопка "Убрать связь", если она есть
+        if local_name in iiko_mappings:
+            buttons.append([InlineKeyboardButton(text="🗑 Убрать текущую связь", callback_data=f"map_unlink_{make_item_hash(local_name)}")])
+
         if not matches:
-            # Если бот ничего не нашел, сразу отправляем в ручной поиск
             await callback.message.edit_text(
                 f"😔 Я не смог найти похожих названий для <b>{local_name}</b> в iiko.\n\n"
                 f"Попробуйте ввести запрос вручную:",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="🔍 Поискать вручную", callback_data=f"map_manual_{local_name}")],
+                    [InlineKeyboardButton(text="🔍 Поискать вручную", callback_data=f"map_manual_{make_item_hash(local_name)}")],
                     [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_mapping")]
-                ]),
+                ] + buttons),
                 parse_mode="HTML"
             )
             await callback.answer()
             return
             
-        buttons = []
         for score, pid, iiko_name in matches:
-            # Красиво отображаем процент совпадения
             percent = int(score * 100)
             buttons.append([InlineKeyboardButton(
                 text=f"✅ Это оно ({percent}%): {iiko_name}", 
                 callback_data=f"map_save_{pid}"
             )])
             
-        buttons.append([InlineKeyboardButton(text="🔍 Нет, поищу вручную", callback_data=f"map_manual_{local_name}")])
+        buttons.append([InlineKeyboardButton(text="🔍 Нет, поищу вручную", callback_data=f"map_manual_{make_item_hash(local_name)}")])
         buttons.append([InlineKeyboardButton(text="⬅️ Отмена", callback_data="admin_mapping")])
         
         await callback.message.edit_text(
@@ -774,7 +822,14 @@ async def cb_map_manual(callback: CallbackQuery, state: FSMContext, is_manager: 
     if not is_manager:
         await callback.answer()
         return
-    local_name = callback.data.replace("map_manual_", "")
+    
+    # ФИКС #1: восстанавливаем имя из хэша
+    item_hash = callback.data.replace("map_manual_", "")
+    local_name = find_item_by_hash(inventory, item_hash)
+    if not local_name:
+        await callback.answer("Позиция не найдена.", show_alert=True)
+        return
+
     await state.update_data(map_local_name=local_name, prompt_msg_id=callback.message.message_id)
     await state.set_state(AdminEditStates.waiting_for_iiko_search)
     
@@ -792,6 +847,8 @@ async def process_iiko_search(message: Message, state: FSMContext, is_manager: b
     if not is_manager: return
     
     if not message.text:
+        try: await message.delete()
+        except Exception: pass
         await message.answer("⚠️ Пожалуйста, отправьте текст для поиска.")
         return
 
@@ -803,15 +860,13 @@ async def process_iiko_search(message: Message, state: FSMContext, is_manager: b
     try: await message.delete()
     except Exception: pass
     
-    # Получаем номенклатуру iiko (она кэшируется, так что это быстро)
     products = await iiko_async_service.get_nomenclature()
     
-    # Ищем совпадения
     matches = []
     for pid, p in products.items():
         if query in p["name"].lower():
             matches.append((pid, p["name"]))
-            if len(matches) >= 10: # Ограничиваем до 10 совпадений, чтобы не спамить
+            if len(matches) >= 10:
                 break
                 
     if not matches:
@@ -838,16 +893,14 @@ async def process_iiko_search(message: Message, state: FSMContext, is_manager: b
     else:
         msg = await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
         await state.update_data(prompt_msg_id=msg.message_id)
-
-@router.callback_query(F.data.startswith("map_save_"))
-async def cb_map_save(callback: CallbackQuery, state: FSMContext, is_manager: bool):
-    if not is_manager:
-        await callback.answer()
-        return
         
-    iiko_id = callback.data.replace("map_save_", "")
+async def _save_mapping_and_show(callback: CallbackQuery, state: FSMContext, iiko_id: str):
     data = await state.get_data()
     local_name = data.get("map_local_name")
+    
+    if not local_name:
+        await callback.answer("❌ Сессия устарела. Откройте сопоставление заново.", show_alert=True)
+        return
     
     iiko_mappings[local_name] = iiko_id
     save_state()
@@ -876,6 +929,73 @@ async def cb_map_save(callback: CallbackQuery, state: FSMContext, is_manager: bo
         
     await callback.answer()
 
+@router.callback_query(F.data.startswith("map_save_"))
+async def cb_map_save(callback: CallbackQuery, state: FSMContext, is_manager: bool):
+    if not is_manager:
+        await callback.answer()
+        return
+        
+    iiko_id = callback.data.replace("map_save_", "")
+    data = await state.get_data()
+    local_name = data.get("map_local_name")
+    
+    if not local_name:
+        await callback.answer("❌ Сессия устарела.", show_alert=True)
+        return
+
+    # ФИКС (Вариант 3): Проверяем, не занят ли этот iiko_id другой позицией
+    conflict_name = None
+    for other_local, mapped_id in iiko_mappings.items():
+        if mapped_id == iiko_id and other_local != local_name:
+            conflict_name = other_local
+            break
+            
+    if conflict_name:
+        # Нашли конфликт — показываем предупреждение
+        buttons = [
+            [InlineKeyboardButton(text="⚠️ Да, я уверен", callback_data=f"map_force_{iiko_id}")],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="admin_mapping")]
+        ]
+        await callback.message.edit_text(
+            f"⚠️ <b>Внимание!</b>\n\n"
+            f"Позиция iiko с ID <code>{iiko_id}</code> уже привязана к вашему складу как <b>{conflict_name}</b>.\n\n"
+            f"Если вы привяжете <b>{local_name}</b> к этому же ID, то бот не сможет точно рассчитать остатки (продажи будут списываться с обеих позиций одновременно).\n\n"
+            f"Вы уверены, что хотите этого?",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+            parse_mode="HTML"
+        )
+        await callback.answer()
+        return
+
+    await _save_mapping_and_show(callback, state, iiko_id)
+
+@router.callback_query(F.data.startswith("map_force_"))
+async def cb_map_force(callback: CallbackQuery, state: FSMContext, is_manager: bool):
+    if not is_manager:
+        await callback.answer()
+        return
+    iiko_id = callback.data.replace("map_force_", "")
+    await _save_mapping_and_show(callback, state, iiko_id)
+
+# ФИКС (Вариант 3): Функция отвязки
+@router.callback_query(F.data.startswith("map_unlink_"))
+async def cb_map_unlink(callback: CallbackQuery, state: FSMContext, is_manager: bool):
+    if not is_manager:
+        await callback.answer()
+        return
+        
+    item_hash = callback.data.replace("map_unlink_", "")
+    local_name = find_item_by_hash(item_hash)
+    
+    if local_name and local_name in iiko_mappings:
+        del iiko_mappings[local_name]
+        save_state()
+        await callback.answer("✅ Связь успешно удалена!", show_alert=True)
+        # Возвращаемся в меню маппинга
+        await cb_admin_mapping(callback, state, is_manager)
+    else:
+        await callback.answer("Связь не найдена.", show_alert=True)
+
 @router.callback_query(F.data.in_({"admin_tech_cards", "tech_cards_refresh"}))
 async def cb_admin_tech_cards(callback: CallbackQuery, is_manager: bool):
     if not is_manager:
@@ -894,7 +1014,6 @@ async def cb_admin_tech_cards(callback: CallbackQuery, is_manager: bool):
         await callback.answer()
         return
 
-    # Если нажали на кнопку "Обновить", сбрасываем кэш
     if callback.data == "tech_cards_refresh":
         iiko_async_service.clear_cache()
         iiko_service.iiko_products_cache = None
@@ -910,7 +1029,6 @@ async def cb_admin_tech_cards(callback: CallbackQuery, is_manager: bool):
             raise Exception("Не удалось получить токен iiko.")
         
         groups_map = await asyncio.to_thread(iiko_service.sync_get_groups, token)
-        # Запрашиваем номенклатуру (после сброса кэша она будет свежей)
         products = await iiko_async_service.get_nomenclature()
 
         group_counts = {}
@@ -924,7 +1042,6 @@ async def cb_admin_tech_cards(callback: CallbackQuery, is_manager: bool):
 
         buttons = []
         if not groups_map:
-            # Если iiko не отдала группы, но блюда есть — покажем их всех вместе
             total_count = sum(group_counts.values())
             buttons.append([InlineKeyboardButton(text=f"📁 Все блюда с техкартами ({total_count})", callback_data="tech_cat_all_0")])
         else:
@@ -933,7 +1050,6 @@ async def cb_admin_tech_cards(callback: CallbackQuery, is_manager: bool):
                 g_name = groups_map.get(g_id, "Без категории")
                 buttons.append([InlineKeyboardButton(text=f"📁 {g_name} ({count})", callback_data=f"tech_cat_{g_id}_0")])
 
-        # Добавляем кнопку обновления перед кнопкой "Назад"
         buttons.append([InlineKeyboardButton(text="🔄 Обновить данные из iiko", callback_data="tech_cards_refresh")])
         buttons.append([InlineKeyboardButton(text="⬅️ Назад в панель", callback_data="admin_panel")])
         
@@ -944,6 +1060,7 @@ async def cb_admin_tech_cards(callback: CallbackQuery, is_manager: bool):
         )
     except Exception as e:
         await callback.message.edit_text(f"❌ Ошибка: {e}", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_panel")]]))
+
 @router.callback_query(F.data.startswith("tech_cat_"))
 async def cb_tech_cat(callback: CallbackQuery, is_manager: bool):
     if not is_manager:
@@ -971,7 +1088,6 @@ async def cb_tech_cat(callback: CallbackQuery, is_manager: bool):
             if not p_info or p_info.get("isDeleted"): continue
             if p_info.get("type") not in ["DISH", "PREPARATION"]: continue
             
-            # Если group_id == "all", берем все, иначе только из выбранной
             if group_id == "all" or (p_info.get("group_id") or "other") == group_id:
                 dishes.append((dish_id, p_info["name"]))
                 
@@ -997,7 +1113,6 @@ async def cb_tech_cat(callback: CallbackQuery, is_manager: bool):
         for d_id, d_name in page_items:
             if len(d_name) > 35:
                 d_name = d_name[:32] + "..."
-            # Убрали group_id и page из callback_data, чтобы не превышать лимит
             buttons.append([InlineKeyboardButton(text=f"👁 {d_name}", callback_data=f"tech_view_{d_id}")])
 
         nav_row = []
@@ -1021,7 +1136,6 @@ async def cb_tech_view(callback: CallbackQuery, is_manager: bool):
         await callback.answer()
         return
 
-    # Забираем только ID блюда
     dish_id = callback.data[len("tech_view_"):]
 
     await callback.answer("Загружаем состав...")
@@ -1049,7 +1163,6 @@ async def cb_tech_view(callback: CallbackQuery, is_manager: bool):
         if len(text) > 3800:
             text = text[:3800] + "\n\n<i>(Список обрезан)</i>"
 
-        # Кнопка Назад теперь ведет просто в список категорий
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="⬅️ К категориям", callback_data="admin_tech_cards")]
         ])

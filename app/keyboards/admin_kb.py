@@ -1,11 +1,12 @@
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from app.state import ADMIN_ID
 
 def get_admin_panel_keyboard(is_full_access: bool) -> InlineKeyboardMarkup:
     kb = [[InlineKeyboardButton(text="✏️ Изменить позиции", callback_data="admin_edit_items")]]
     if is_full_access:
         kb.extend([
             [InlineKeyboardButton(text="📊 Остатки по iiko", callback_data="iiko_view")],
-            [InlineKeyboardButton(text="🍽 Текущие техкарты", callback_data="admin_tech_cards")], # <-- ВОТ КНОПКА
+            [InlineKeyboardButton(text="🍽 Текущие техкарты", callback_data="admin_tech_cards")],
             [InlineKeyboardButton(text="🔗 Сопоставление с iiko", callback_data="admin_mapping")],
             [InlineKeyboardButton(text="👥 Пользователи и история", callback_data="admin_users")],
             [InlineKeyboardButton(text="📢 Отправить уведомление", callback_data="admin_notify")],
@@ -14,13 +15,15 @@ def get_admin_panel_keyboard(is_full_access: bool) -> InlineKeyboardMarkup:
     kb.append([InlineKeyboardButton(text="⬅️ Назад в главное меню", callback_data="main_menu")])
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
-def get_admin_other_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👑 Администраторы", callback_data="admin_manage_admins")],
-        [InlineKeyboardButton(text="💼 Управляющие", callback_data="admin_manage_managers")],
-        [InlineKeyboardButton(text="🔄 Обновить техкарты", callback_data="iiko_scan_techcards")],
-        [InlineKeyboardButton(text="⬅️ Назад в панель", callback_data="admin_panel")]
-    ])
+def get_admin_other_keyboard(is_super: bool = False) -> InlineKeyboardMarkup:
+    # ФИКС #9: кнопка «Администраторы» — только для главного администратора
+    kb = []
+    if is_super:
+        kb.append([InlineKeyboardButton(text="👑 Администраторы", callback_data="admin_manage_admins")])
+    kb.append([InlineKeyboardButton(text="💼 Управляющие", callback_data="admin_manage_managers")])
+    kb.append([InlineKeyboardButton(text="🔄 Обновить техкарты", callback_data="iiko_scan_techcards")])
+    kb.append([InlineKeyboardButton(text="⬅️ Назад в панель", callback_data="admin_panel")])
+    return InlineKeyboardMarkup(inline_keyboard=kb)
 
 def get_role_management_keyboard(role_type: str, users: list) -> InlineKeyboardMarkup:
     kb = []
@@ -44,8 +47,11 @@ def get_users_to_promote_keyboard(users_db: dict, current_role_ids: set, role_ty
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def get_users_to_demote_keyboard(users_db: dict, current_role_ids: set, role_type: str) -> InlineKeyboardMarkup:
+    # ФИКС #10: главного админа нельзя снять — не показываем его в списке
     buttons = []
     for uid in current_role_ids:
+        if uid == ADMIN_ID:
+            continue
         uname = users_db.get(uid, "Сотрудник")
         buttons.append([InlineKeyboardButton(text=f"❌ {uname}", callback_data=f"del_{role_type}_{uid}")])
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"admin_manage_{role_type}s")])

@@ -20,18 +20,14 @@ class LogService:
         self.log_id_counter += 1
         self.logs.append(log_entry)
         
-        # Храним только 100 последних логов, чтобы файл не разрастался
-        if len(self.logs) > 100: 
+        # ФИКС #43: храним 300 логов вместо 100
+        if len(self.logs) > 300: 
             self.logs.pop(0)
         
-        # Делаем копию списка. Это защищает от ошибки "dictionary changed size during iteration",
-        # если бот добавит новый лог, пока фоновый поток записывает старые.
         logs_to_save = list(self.logs)
         
         try:
-            # Если мы внутри бота (есть запущенный event loop) — пишем в фоновом потоке
             loop = asyncio.get_running_loop()
             loop.create_task(asyncio.to_thread(self.repo.save_logs, logs_to_save))
         except RuntimeError:
-            # Если event loop нет (например, при импорте или в тестах) — пишем синхронно
             self.repo.save_logs(logs_to_save)

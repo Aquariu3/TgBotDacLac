@@ -28,6 +28,11 @@ LOG_CATEGORIES = {
     "role": ("👑 Права", ["назначил", "лишил"]),
     "other": ("🗂 Другое", [])
 }
+# ФИКС #16: правильные склонения для ролей
+ROLE_FORMS = {
+    "admin":   {"inst": "администратором", "gen": "администратора", "name": "Администратор", "name_lower": "администратор"},
+    "manager": {"inst": "управляющим",     "gen": "управляющего",    "name": "Управляющий",    "name_lower": "управляющий"},
+}
 
 def get_log_category(action: str) -> str:
     action_lower = action.lower()
@@ -57,11 +62,18 @@ async def _render_role_menu(message: Message, role_type: str):
         for uid, name in current_users:
             text += f"• {name}\n"
             
-    await message.edit_text(
-        text, 
-        reply_markup=get_role_management_keyboard(role_type, current_users), 
-        parse_mode="HTML"
-    )
+    # ФИКС #15: защита от TelegramBadRequest при повторном нажатии
+    try:
+        await message.edit_text(
+            text, 
+            reply_markup=get_role_management_keyboard(role_type, current_users), 
+            parse_mode="HTML"
+        )
+    except TelegramBadRequest as e:
+        if "message is not modified" not in str(e):
+            logging.warning(f"_render_role_menu: {e}")
+    except Exception as e:
+        logging.warning(f"_render_role_menu: {e}")
 
 @router.callback_query(F.data == "admin_panel")
 async def cb_admin_panel(callback: CallbackQuery, is_admin: bool, is_manager: bool):
@@ -74,40 +86,60 @@ async def cb_admin_panel(callback: CallbackQuery, is_admin: bool, is_manager: bo
     text = "⚙️ <b>Панель Управляющего</b>\n\nЗдесь вы можете контролировать остатки и смотреть активность сотрудников."
     kb = get_admin_panel_keyboard(is_full_access)
     
-    if callback.message.text and callback.message.text.startswith(("✅", "💾", "❌", "📝", "🔔")):
+    # ФИКС: если пришли из статусного сообщения — удаляем его и отправляем новое (не редактируем)
+    if callback.message.text and callback.message.text.startswith(("✅", "💾", "❌", "📝", "🔔", "🟢")):
         try: await callback.message.delete()
         except Exception: pass
-        await callback.message.answer(text, reply_markup=kb, parse_mode="HTML")
+        msg = await callback.message.answer(text, reply_markup=kb, parse_mode="HTML")
+        # не забываем обновить last_menu_messages
+        last_menu_messages[callback.from_user.id] = msg.message_id
     else:
-        await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+        # Используем edit_text с защитой от "message is not modified"
+        try:
+            await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+        except TelegramBadRequest as e:
+            if "message is not modified" not in str(e):
+                logging.warning(f"cb_admin_panel: {e}")
+                msg = await callback.message.answer(text, reply_markup=kb, parse_mode="HTML")
+                last_menu_messages[callback.from_user.id] = msg.message_id
+        except Exception as e:
+            logging.warning(f"cb_admin_panel: {e}")
     await callback.answer()
 
 @router.callback_query(F.data == "admin_other_menu")
-async def cb_admin_other_menu(callback: CallbackQuery, is_manager: bool):
+async def cb_admin_other_menu(callback: CallbackQuery, is_manager: bool, is_super: bool):
     if not is_manager:
         await callback.message.delete()
         await callback.message.answer("⛔ У вас нет прав! Нажмите /start")
         return
     
-    await callback.message.edit_text(
-        "⚙️ <b>Остальное</b>\n\nВыберите действие:", 
-        reply_markup=get_admin_other_keyboard(), 
-        parse_mode="HTML"
-    )
+    try:
+        await callback.message.edit_text(
+            "⚙️ <b>Остальное</b>\n\nВыберите действие:", 
+            reply_markup=get_admin_other_keyboard(is_super), 
+            parse_mode="HTML"
+        )
+    except TelegramBadRequest as e:
+        if "message is not modified" not in str(e):
+            logging.warning(f"cb_admin_other_menu: {e}")
     await callback.answer()
 
 @router.callback_query(F.data.in_({"admin_manage_admins", "admin_manage_managers"}))
-async def cb_manage_roles(callback: CallbackQuery, is_manager: bool):
+async def cb_manage_roles(callback: CallbackQuery, is_manager: bool, is_super: bool):
     if not is_manager: 
         await callback.message.delete()
         await callback.answer()
         return
     role_type = "admin" if callback.data == "admin_manage_admins" else "manager"
+    # ФИКС #9: только главный админ может управлять администраторами
+    if role_type == "admin" and not is_super:
+        await callback.answer("⛔ Только главный администратор может управлять администраторами.", show_alert=True)
+        return
     await _render_role_menu(callback.message, role_type)
     await callback.answer()
 
 @router.callback_query(F.data.startswith("admin_add_role_"))
-async def cb_admin_add_role(callback: CallbackQuery, is_manager: bool):
+async def cb_admin_add_role(callback: CallbackQuery, is_manager: bool, is_super: bool):
     if not is_manager: 
         await callback.message.delete()
         await callback.answer()
@@ -115,6 +147,11 @@ async def cb_admin_add_role(callback: CallbackQuery, is_manager: bool):
     
     role_type = callback.data.replace("admin_add_role_", "")
     is_admin_role = (role_type == "admin")
+    # ФИКС #9
+    if is_admin_role and not is_super:
+        await callback.answer("⛔ Только главный администратор может назначать администраторов.", show_alert=True)
+        return
+
     target_list = admin_ids if is_admin_role else manager_ids
 
     keyboard = get_users_to_promote_keyboard(users_db, target_list, role_type)
@@ -123,15 +160,19 @@ async def cb_admin_add_role(callback: CallbackQuery, is_manager: bool):
         await callback.answer("Все зарегистрированные пользователи уже имеют эту роль!", show_alert=True)
         return
         
-    await callback.message.edit_text(
-        f"👑 <b>Выберите пользователя, чтобы сделать его {'администратором' if is_admin_role else 'управляющим'}:</b>\n\n", 
-        reply_markup=keyboard, 
-        parse_mode="HTML"
-    )
+    try:
+        await callback.message.edit_text(
+            f"👑 <b>Выберите пользователя, чтобы сделать его {'администратором' if is_admin_role else 'управляющим'}:</b>\n\n", 
+            reply_markup=keyboard, 
+            parse_mode="HTML"
+        )
+    except TelegramBadRequest as e:
+        if "message is not modified" not in str(e):
+            logging.warning(f"cb_admin_add_role: {e}")
     await callback.answer()
 
 @router.callback_query(F.data.startswith("make_"))
-async def cb_make_role(callback: CallbackQuery, is_manager: bool):
+async def cb_make_role(callback: CallbackQuery, is_manager: bool, is_super: bool):
     if not is_manager: 
         await callback.message.delete()
         await callback.answer()
@@ -142,9 +183,15 @@ async def cb_make_role(callback: CallbackQuery, is_manager: bool):
     target_id = int(parts[2])
     
     is_admin_role = (role_type == "admin")
+    # ФИКС #9: только super назначает админов
+    if is_admin_role and not is_super:
+        await callback.answer("⛔ Только главный администратор может назначать администраторов.", show_alert=True)
+        return
+    
     target_name = users_db.get(target_id, "Сотрудник")
     target_list = admin_ids if is_admin_role else manager_ids
-    role_name = "Администратор" if is_admin_role else "Управляющий"
+    # ФИКС #16: правильные склонения
+    form = ROLE_FORMS[role_type]
 
     if target_id not in target_list:
         target_list.add(target_id)
@@ -152,7 +199,7 @@ async def cb_make_role(callback: CallbackQuery, is_manager: bool):
         log_service.add_log(
             callback.from_user.id, 
             users_db.get(callback.from_user.id, "Админ"), 
-            f"назначил(а) {target_name} {role_name.lower()}ом"
+            f"назначил(а) {target_name} {form['inst']}"
         )
         save_state()
         
@@ -161,9 +208,10 @@ async def cb_make_role(callback: CallbackQuery, is_manager: bool):
                 try: await callback.bot.delete_message(target_id, last_menu_messages[target_id])
                 except Exception as e: logging.warning(f"Не удалось удалить меню у {target_id}: {e}")
             
+            # ФИКС #16: правильный текст сообщения
             msg = await callback.bot.send_message(
                 target_id, 
-                f"👑 <b>Вам выданы права {role_name.lower()}а!</b>\n"
+                f"👑 <b>Вам выданы права {form['gen']}!</b>\n"
                 "Нажмите /start, чтобы увидеть панель.", 
                 parse_mode="HTML"
             )
@@ -172,10 +220,10 @@ async def cb_make_role(callback: CallbackQuery, is_manager: bool):
             logging.warning(f"Не удалось отправить уведомление о правах {target_id}: {e}")
     
     await _render_role_menu(callback.message, role_type)
-    await callback.answer(f"✅ {target_name} теперь {role_name}!")
+    await callback.answer(f"✅ {target_name} теперь {form['name_lower']}!")
 
 @router.callback_query(F.data.startswith("admin_del_role_"))
-async def cb_admin_del_role(callback: CallbackQuery, is_manager: bool):
+async def cb_admin_del_role(callback: CallbackQuery, is_manager: bool, is_super: bool):
     if not is_manager: 
         await callback.message.delete()
         await callback.answer()
@@ -183,19 +231,28 @@ async def cb_admin_del_role(callback: CallbackQuery, is_manager: bool):
     
     role_type = callback.data.replace("admin_del_role_", "")
     is_admin_role = (role_type == "admin")
+    # ФИКС #9
+    if is_admin_role and not is_super:
+        await callback.answer("⛔ Только главный администратор может снимать администраторов.", show_alert=True)
+        return
+
     target_list = admin_ids if is_admin_role else manager_ids
 
     keyboard = get_users_to_demote_keyboard(users_db, target_list, role_type)
     
-    await callback.message.edit_text(
-        f"❌ <b>Выберите, кого лишить прав {'администратора' if is_admin_role else 'управляющего'}:</b>\n\n", 
-        reply_markup=keyboard, 
-        parse_mode="HTML"
-    )
+    try:
+        await callback.message.edit_text(
+            f"❌ <b>Выберите, кого лишить прав {'администратора' if is_admin_role else 'управляющего'}:</b>\n\n", 
+            reply_markup=keyboard, 
+            parse_mode="HTML"
+        )
+    except TelegramBadRequest as e:
+        if "message is not modified" not in str(e):
+            logging.warning(f"cb_admin_del_role: {e}")
     await callback.answer()
 
 @router.callback_query(F.data.startswith("del_"))
-async def cb_do_demote(callback: CallbackQuery, is_manager: bool):
+async def cb_do_demote(callback: CallbackQuery, is_manager: bool, is_super: bool):
     if not is_manager: 
         await callback.message.delete()
         await callback.answer()
@@ -206,9 +263,19 @@ async def cb_do_demote(callback: CallbackQuery, is_manager: bool):
     target_id = int(parts[2])
     
     is_admin_role = (role_type == "admin")
+    # ФИКС #9
+    if is_admin_role and not is_super:
+        await callback.answer("⛔ Только главный администратор может снимать администраторов.", show_alert=True)
+        return
+    
+    # ФИКС #10: главного админа снять нельзя
+    if target_id == ADMIN_ID:
+        await callback.answer("⛔ Нельзя снять права с главного администратора.", show_alert=True)
+        return
+    
     target_list = admin_ids if is_admin_role else manager_ids
     target_name = users_db.get(target_id, "Сотрудник")
-    role_name = "Администратора" if is_admin_role else "Управляющего"
+    form = ROLE_FORMS[role_type]
 
     if target_id in target_list:
         target_list.remove(target_id)
@@ -216,7 +283,7 @@ async def cb_do_demote(callback: CallbackQuery, is_manager: bool):
         log_service.add_log(
             callback.from_user.id, 
             users_db.get(callback.from_user.id, "Админ"), 
-            f"лишил(а) {target_name} прав {role_name.lower()}"
+            f"лишил(а) {target_name} прав {form['gen']}"
         )
         save_state()
         
@@ -225,18 +292,19 @@ async def cb_do_demote(callback: CallbackQuery, is_manager: bool):
                 try: await callback.bot.delete_message(target_id, last_menu_messages[target_id])
                 except Exception as e: logging.warning(f"Не удалось удалить меню у {target_id}: {e}")
             
+            # ФИКС #3: правильное сообщение — «сняты», а не «выданы»
             msg = await callback.bot.send_message(
                 target_id, 
-                f"👑 <b>Вам выданы права {role_name.lower()}а!</b>\n"
-                "Нажмите /start, чтобы увидеть панель.", 
+                f"❌ <b>С вас сняты права {form['gen']}.</b>\n"
+                "Нажмите /start для обновления меню.", 
                 parse_mode="HTML"
             )
             last_menu_messages[target_id] = msg.message_id
         except Exception as e:
-            logging.warning(f"Не удалось отправить уведомление о правах {target_id}: {e}")
+            logging.warning(f"Не удалось отправить уведомление о снятии прав {target_id}: {e}")
     
     await _render_role_menu(callback.message, role_type)
-    await callback.answer(f"✅ {target_name} больше не {role_name}")
+    await callback.answer(f"✅ {target_name} больше не {form['name_lower']}")
 
 @router.callback_query(F.data == "admin_users")
 async def cb_admin_users(callback: CallbackQuery, is_manager: bool):
@@ -260,8 +328,8 @@ async def cb_admin_users(callback: CallbackQuery, is_manager: bool):
     if not log_service.logs:
         text += "• <i>Пока нет действий</i>\n"
     else:
-        for log in reversed(log_service.logs[-5:]): # Показываем только 5 последних глобальных действий
-            text += f"• [{log['time']}] <b>{log['user_name']}</b> — {log['action']}\n"
+        for log in reversed(log_service.logs[-5:]):
+            text += f"• [{log.get('time', '—')}] <b>{log.get('user_name', 'Неизвестный')}</b> — {log.get('action', '—')}\n"
 
     buttons = []
     recent_logs = list(reversed(log_service.logs[-20:]))
@@ -307,10 +375,9 @@ async def cb_history_user(callback: CallbackQuery, is_manager: bool):
     user_name = user_logs[-1].get("user_name", "Сотрудник")
     text = f"👤 <b>История действий: {user_name}</b>\n\nВыберите категорию действий для просмотра:"
     
-    # Группируем логи по категориям
     grouped = {cat: [] for cat in LOG_CATEGORIES.keys()}
     for log in user_logs:
-        cat = get_log_category(log["action"])
+        cat = get_log_category(log.get("action", ""))
         grouped[cat].append(log)
 
     buttons = []
@@ -412,16 +479,22 @@ async def cb_view_log(callback: CallbackQuery, is_manager: bool):
     back_page = int(parts[5]) if len(parts) > 5 else 0
 
     log_entry = next((l for l in log_service.logs if l["id"] == log_id), None)
-    if not log_entry or not log_entry["snapshot"]:
+    if not log_entry or not log_entry.get("snapshot"):
         await callback.answer("❌ Данные не найдены или устарели.", show_alert=True)
         return
     
+    # ФИКС: защита от не-dict snapshot (например, если это число или список)
+    snapshot = log_entry["snapshot"]
+    if not isinstance(snapshot, dict):
+        await callback.answer("❌ Данные в старом формате, детали недоступны.", show_alert=True)
+        return
+
     text = f"📄 <b>Детали действия</b>\n"
-    text += f"Сотрудник: <b>{log_entry['user_name']}</b>\n"
-    text += f"Действие: {log_entry['action']}\n"
-    text += f"Время: {log_entry['time']}\n\n"
+    text += f"Сотрудник: <b>{log_entry.get('user_name', 'Неизвестный')}</b>\n"
+    text += f"Действие: {log_entry.get('action', '—')}\n"
+    text += f"Время: {log_entry.get('time', '—')}\n\n"
     text += "<b>Введенные данные:</b>\n"
-    for name, val in log_entry["snapshot"].items():
+    for name, val in snapshot.items():
         if name == "undo_type": continue 
         if isinstance(val, dict) and "qty" in val:
             text += f"• {name}: всего <b>{val.get('qty')}</b>, витрина <b>{val.get('display_qty')}</b>\n"
@@ -431,10 +504,9 @@ async def cb_view_log(callback: CallbackQuery, is_manager: bool):
             text += f"• {name}: <b>{val}</b>\n"
             
     buttons = []
-    if isinstance(log_entry.get("snapshot"), dict) and log_entry["snapshot"].get("undo_type"):
+    if snapshot.get("undo_type"):
         buttons.append([InlineKeyboardButton(text="↩️ Отменить это действие", callback_data=f"undo_{log_id}")])
     
-    # Правильная кнопка "Назад" в зависимости от того, откуда пришли
     if back_cat:
         back_cb = f"hist_cat_{user_id_back}_{back_cat}_{back_page}"
     elif user_id_back:
@@ -453,7 +525,7 @@ async def cb_view_log(callback: CallbackQuery, is_manager: bool):
     await callback.answer()
 
 @router.callback_query(F.data.startswith("undo_"))
-async def cb_undo_action(callback: CallbackQuery, is_manager: bool):
+async def cb_undo_action(callback: CallbackQuery, is_manager: bool, is_super: bool):
     if not is_manager:
         await callback.message.delete()
         await callback.answer()
@@ -464,6 +536,12 @@ async def cb_undo_action(callback: CallbackQuery, is_manager: bool):
     
     if not log_entry or not log_entry.get("snapshot") or not isinstance(log_entry["snapshot"], dict):
         await callback.answer("❌ Данные для отката не найдены.", show_alert=True)
+        return
+
+    # ФИКС #11: управляющий может отменить только свои действия.
+    # Главный администратор — любые.
+    if log_entry.get("user_id") != callback.from_user.id and not is_super:
+        await callback.answer("❌ Вы можете отменить только свои действия.", show_alert=True)
         return
 
     snap = log_entry["snapshot"]
@@ -545,12 +623,18 @@ async def cb_notify_target(callback: CallbackQuery, state: FSMContext, is_manage
 async def process_broadcast(message: Message, state: FSMContext, is_manager: bool):
     if not is_manager: return
     if not message.text:
+        try: await message.delete()
+        except Exception: pass
         await message.answer("⚠️ Пожалуйста, отправьте текстовое сообщение.")
         return
     data = await state.get_data()
     target = data.get("notify_target")
     prompt_msg_id = data.get("prompt_msg_id")
-    text = message.text
+    
+    # ФИКС #13: экранируем текст, чтобы невалидный HTML не сломал рассылку
+    from html import escape
+    text = escape(message.text)
+    
     await state.clear()
     success_count = 0
     fail_count = 0

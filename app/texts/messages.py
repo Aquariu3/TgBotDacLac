@@ -10,7 +10,12 @@ def build_key_remainders_text(inventory: dict) -> str:
 
 def get_main_menu_text(inventory: dict, has_access: bool, user_name: str) -> str:
     text = f"Главное меню управления остатками ({user_name}):"
-    if has_access: text += "\n\n" + build_key_remainders_text(inventory)
+    if has_access:
+        key_text = build_key_remainders_text(inventory)
+        # ФИКС #29: защита от превышения лимита Telegram (4096)
+        if len(text) + len(key_text) > 3500:
+            key_text = key_text[:3500 - len(text)] + "\n\n<i>(Список ключевых остатков обрезан)</i>"
+        text += "\n\n" + key_text
     return text
 
 def build_admin_progress_text(inventory: dict, user_name: str, collected: dict) -> str:
@@ -26,7 +31,6 @@ def build_admin_progress_text(inventory: dict, user_name: str, collected: dict) 
 def build_inventory_text(inventory: dict, header: str) -> str:
     lines = [header]
     
-    # Группируем по категориям, чтобы новые позиции не создавали дубли заголовков
     grouped = {}
     for name, data in inventory.items():
         cat = data.get("category", "other")
@@ -45,13 +49,11 @@ def build_inventory_text(inventory: dict, header: str) -> str:
                 
     full_text = "\n".join(lines)
     
-    # Защита от ошибки "Message is too long" (лимит Telegram - 4096 символов)
-    MAX_LEN = 3900  # Оставляем запас для HTML-тегов
+    MAX_LEN = 3900
     if len(full_text) > MAX_LEN:
         truncated = []
         current_len = 0
         for line in lines:
-            # +1 за символ переноса строки
             if current_len + len(line) + 1 > MAX_LEN:
                 break
             truncated.append(line)

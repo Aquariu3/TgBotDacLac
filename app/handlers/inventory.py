@@ -10,32 +10,33 @@ from app.keyboards.inventory_kb import (
     build_coffee_keyboard, build_milk_keyboard, build_drinks_keyboard, 
     build_supplies_keyboard, build_subcat_keyboard, build_food_keyboard
 )
-from app.text_utils import find_item_by_hash
+from app.state import find_item_by_hash
+from app.telegram_utils import safe_edit
 
 router = Router()
 
 @router.callback_query(F.data == "category_coffee")
 async def cb_coffee(callback: CallbackQuery, state: FSMContext):
     await state.clear()
-    await callback.message.edit_text("☕ <b>Категория: Кофе</b>\nНажмите на позицию для редактирования:", reply_markup=build_coffee_keyboard(inventory), parse_mode="HTML")
+    await safe_edit(callback.message, "☕ <b>Категория: Кофе</b>\nНажмите на позицию для редактирования:", reply_markup=build_coffee_keyboard(inventory), parse_mode="HTML")
     await callback.answer()
 
 @router.callback_query(F.data == "category_milk")
 async def cb_milk(callback: CallbackQuery, state: FSMContext):
     await state.clear()
-    await callback.message.edit_text("🥛 <b>Категория: Молочка</b>\nНажмите на позицию для редактирования:", reply_markup=build_milk_keyboard(inventory), parse_mode="HTML")
+    await safe_edit(callback.message, "🥛 <b>Категория: Молочка</b>\nНажмите на позицию для редактирования:", reply_markup=build_milk_keyboard(inventory), parse_mode="HTML")
     await callback.answer()
 
 @router.callback_query(F.data == "category_drinks")
 async def cb_drinks(callback: CallbackQuery, state: FSMContext):
     await state.clear()
-    await callback.message.edit_text("🥤 <b>Категория: Напитки в банке</b>\nНажмите на позицию для редактирования:", reply_markup=build_drinks_keyboard(inventory), parse_mode="HTML")
+    await safe_edit(callback.message, "🥤 <b>Категория: Напитки в банке</b>\nНажмите на позицию для редактирования:", reply_markup=build_drinks_keyboard(inventory), parse_mode="HTML")
     await callback.answer()
 
 @router.callback_query(F.data == "category_supplies")
 async def cb_supplies(callback: CallbackQuery, state: FSMContext):
     await state.clear()
-    await callback.message.edit_text("📦 <b>Категория: Расходники</b>\nВыберите подкатегорию:", reply_markup=build_supplies_keyboard(), parse_mode="HTML")
+    await safe_edit(callback.message, "📦 <b>Категория: Расходники</b>\nВыберите подкатегорию:", reply_markup=build_supplies_keyboard(), parse_mode="HTML")
     await callback.answer()
 
 @router.callback_query(F.data.startswith("subcat_"))
@@ -43,13 +44,13 @@ async def cb_subcat(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     subcat = callback.data.replace("subcat_", "")
     title = "🥤 Стаканы" if subcat == "cups" else "🔘 Крышки"
-    await callback.message.edit_text(f"<b>{title}</b>\nНажмите на позицию для редактирования:", reply_markup=build_subcat_keyboard(inventory, subcat), parse_mode="HTML")
+    await safe_edit(callback.message, f"<b>{title}</b>\nНажмите на позицию для редактирования:", reply_markup=build_subcat_keyboard(inventory, subcat), parse_mode="HTML")
     await callback.answer()
 
 @router.callback_query(F.data == "category_food")
 async def cb_food(callback: CallbackQuery, state: FSMContext):
     await state.clear()
-    await callback.message.edit_text("🍰 <b>Категория: Десерты и Еда</b>\nВыберите позицию:", reply_markup=build_food_keyboard(inventory), parse_mode="HTML")
+    await safe_edit(callback.message, "🍰 <b>Категория: Десерты и Еда</b>\nВыберите позицию:", reply_markup=build_food_keyboard(inventory), parse_mode="HTML")
     await callback.answer()
 
 @router.callback_query(F.data.startswith("set_"))
@@ -78,6 +79,8 @@ async def cb_set_item_qty(callback: CallbackQuery, state: FSMContext):
 @router.message(InventoryStates.waiting_for_new_qty)
 async def process_new_qty(message: Message, state: FSMContext):
     if not message.text:
+        try: await message.delete()
+        except Exception: pass
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="edit_categories_menu")]])
         await message.answer("⚠️ Пожалуйста, отправьте число.", reply_markup=kb)
         return
@@ -85,6 +88,8 @@ async def process_new_qty(message: Message, state: FSMContext):
         val = float(message.text.replace(",", "."))
         if not math.isfinite(val) or val < 0: raise ValueError
     except ValueError:
+        try: await message.delete()
+        except Exception: pass
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="edit_categories_menu")]])
         await message.answer("⚠️ Пожалуйста, введите корректное число (0 или больше):", reply_markup=kb)
         return
@@ -139,6 +144,8 @@ async def process_new_qty(message: Message, state: FSMContext):
 @router.message(InventoryStates.waiting_for_new_qty_display)
 async def process_new_qty_display(message: Message, state: FSMContext):
     if not message.text:
+        try: await message.delete()
+        except Exception: pass
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="edit_categories_menu")]])
         await message.answer("⚠️ Пожалуйста, отправьте число.", reply_markup=kb)
         return
@@ -146,6 +153,8 @@ async def process_new_qty_display(message: Message, state: FSMContext):
         val = float(message.text.replace(",", "."))
         if not math.isfinite(val) or val < 0: raise ValueError
     except ValueError:
+        try: await message.delete()
+        except Exception: pass
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="edit_categories_menu")]])
         await message.answer("⚠️ Пожалуйста, введите корректное число (0 или больше):", reply_markup=kb)
         return

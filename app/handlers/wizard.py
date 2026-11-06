@@ -38,8 +38,6 @@ async def _wizard_show_step(bot: Bot, state: FSMContext, chat_id: int):
         await _wizard_finish(bot, state, chat_id)
         return
 
-    # П.11: если позицию удалили во время мастера — пропускаем её и идём дальше,
-    # иначе all_keys.index() ниже упадёт с ValueError.
     if current_item not in inventory:
         data["current_item"] = get_next_item(data)
         await state.update_data(data)
@@ -165,6 +163,15 @@ async def wizard_resume(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
     if user_id in user_progress:
         saved_data = user_progress.pop(user_id)
+        # ФИКС #18: защита от KeyError при поврежденном progress.json
+        saved_data.setdefault("collected_data", {})
+        saved_data.setdefault("history", [])
+        saved_data.setdefault("active_category", None)
+        saved_data.setdefault("current_item", None)
+        saved_data.setdefault("wizard_message_id", None)
+        saved_data.setdefault("admin_msg_id", None)
+        saved_data.setdefault("wizard_user_id", user_id)
+
         await state.update_data(saved_data)
         await state.set_state(InventoryStates.wizard_qty)
         try: await callback.message.delete()
@@ -267,7 +274,6 @@ async def wizard_skip_item(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     current_item = data.get("current_item")
     
-    # П.3: Защита от удаления позиции во время мастера
     if current_item and current_item not in inventory:
         data["current_item"] = get_next_item(data)
         await state.update_data(data)
@@ -376,19 +382,22 @@ async def wizard_cancel(callback: CallbackQuery, state: FSMContext):
 @router.message(InventoryStates.wizard_qty)
 async def process_wizard_qty(message: Message, state: FSMContext):
     if not message.text:
+        try: await message.delete()
+        except Exception: pass
         await message.answer("⚠️ Пожалуйста, отправьте число.")
         return
     try:
         val = float(message.text.replace(",", "."))
         if not math.isfinite(val) or val < 0: raise ValueError
     except ValueError:
+        try: await message.delete()
+        except Exception: pass
         await message.answer("⚠️ Пожалуйста, введите корректное число (0 или больше):")
         return
     data = await state.get_data()
     current_item = data.get("current_item")
     if not current_item: return
     
-    # П.3: Защита от удаления позиции во время мастера
     if current_item not in inventory:
         await message.answer("⚠️ Эта позиция была удалена администратором. Переходим к следующей.")
         data["current_item"] = get_next_item(data)
@@ -420,19 +429,22 @@ async def process_wizard_qty(message: Message, state: FSMContext):
 @router.message(InventoryStates.wizard_display_qty)
 async def process_wizard_display_qty(message: Message, state: FSMContext):
     if not message.text:
+        try: await message.delete()
+        except Exception: pass
         await message.answer("⚠️ Пожалуйста, отправьте число.")
         return
     try:
         val = float(message.text.replace(",", "."))
         if not math.isfinite(val) or val < 0: raise ValueError
     except ValueError:
+        try: await message.delete()
+        except Exception: pass
         await message.answer("⚠️ Пожалуйста, введите корректное число (0 или больше):")
         return
     data = await state.get_data()
     current_item = data.get("current_item")
     total_qty = data.get("temp_total_qty")
     
-    # П.3: Защита от удаления позиции во время мастера
     if current_item not in inventory:
         await message.answer("⚠️ Эта позиция была удалена администратором. Переходим к следующей.")
         data["current_item"] = get_next_item(data)
