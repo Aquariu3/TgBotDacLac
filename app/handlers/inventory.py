@@ -56,7 +56,7 @@ async def cb_food(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data.startswith("set_"))
 async def cb_set_item_qty(callback: CallbackQuery, state: FSMContext):
     item_hash = callback.data[len("set_"):]
-    item_name = find_item_by_hash(inventory, item_hash)
+    item_name = find_item_by_hash(item_hash)
     if not item_name or item_name not in inventory:
         await callback.answer("❌ Позиция не найдена (возможно, удалена). Обновите меню.", show_alert=True)
         return
