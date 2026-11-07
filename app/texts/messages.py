@@ -8,6 +8,21 @@ def build_key_remainders_text(inventory: dict) -> str:
             lines.append(f"• {name}: <b>{inventory[name].get('qty', 0)}</b> {unit}")
     return "\n".join(lines)
 
+def build_shift_info_text(active_employees: list[dict] | None) -> str:
+    # Защита: если сервис вернул None (или упадёт и вернёт старый кэш) — не падаем
+    if not active_employees:
+        return "👥 <b>Сегодня на смене:</b> <i>никого нет</i>"
+    
+    lines = ["👥 <b>Сегодня на смене:</b>"]
+    for emp in active_employees:
+        name = emp.get("name", "Сотрудник")
+        time = emp.get("time", "")
+        if time:
+            lines.append(f"• {name} (с {time})")
+        else:
+            lines.append(f"• {name}")
+    return "\n".join(lines)
+
 def get_main_menu_text(inventory: dict, has_access: bool, user_name: str) -> str:
     text = f"Главное меню управления остатками ({user_name}):"
     if has_access:

@@ -5,34 +5,42 @@ from aiogram import Bot, Dispatcher
 from app.config import settings, DATA_DIR
 from app.handlers import setup_routers
 
-# Импорты из состояния
 from app.state import (
     users_db, user_progress, inventory, ADMIN_ID, 
     admin_ids, manager_ids, save_state, _save_state_sync, 
     notification_service, last_menu_messages, load_state,
-    wait_for_saves  # <-- ФИКС #17
+    wait_for_saves,       # <-- ФИКС #17
+    iiko_async_service,   # <-- для get_active_employees
 )
 
-# Импорты для меню
-from app.texts.messages import get_main_menu_text
+from app.texts.messages import get_main_menu_text, build_shift_info_text
 from app.keyboards.main_kb import get_main_menu
 from app.handlers.common import get_user_role
 
 async def on_startup(bot: Bot):
     logging.info("Бот запускается. Загружаем данные...")
     load_state()
-    
+
     logging.info("Обновляем меню у пользователей...")
-    
+
+    # ОДИН запрос списка смены на весь on_startup (а не внутри цикла).
+    # Если iiko недоступна — get_active_employees пробросит raise,
+    # ловим его здесь и показываем "информация временно недоступна".
+    try:
+        active_emps = await iiko_async_service.get_active_employees()
+        shift_text = build_shift_info_text(active_emps)
+    except Exception as e:
+        logging.warning(f"Не удалось получить информацию о смене: {e}")
+        shift_text = "👥 <b>Сегодня на смене:</b> <i>информация временно недоступна</i>"
+
     for user_id, user_name in list(users_db.items()):
         is_super = (user_id == ADMIN_ID)
         is_manager = (user_id in manager_ids) or is_super
         is_admin = (user_id in admin_ids) or is_manager
-        
+
         role_text, has_access = get_user_role(is_super, is_manager, is_admin)
-        
-        text = f"Рад видеть вас снова, <b>{user_name}</b>!\n\n{role_text}\n\n" + get_main_menu_text(inventory, has_access, user_name)
-        
+
+        text = f"Рад видеть вас снова, <b>{user_name}</b>!\n\n{role_text}\n\n{shift_text}\n\n" + get_main_menu_text(inventory, has_access, user_name)
         if has_access:
             text = "🟢 <b>Бот снова в сети!</b>\n\n" + text
 
@@ -40,7 +48,7 @@ async def on_startup(bot: Bot):
             if user_id in last_menu_messages:
                 try: await bot.delete_message(user_id, last_menu_messages[user_id])
                 except Exception: pass
-                
+
             try:
                 msg = await bot.send_message(user_id, text, reply_markup=get_main_menu(has_access), parse_mode="HTML")
                 last_menu_messages[user_id] = msg.message_id
@@ -76,7 +84,6 @@ async def on_startup(bot: Bot):
 
     save_state()
     logging.info("Бот готов к работе!")
-
 async def on_shutdown(bot: Bot):
     logging.info("Остановка бота. Очистка сообщений...")
     

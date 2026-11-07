@@ -8,6 +8,8 @@ from aiogram.exceptions import TelegramBadRequest
 
 from app.state import inventory, users_db, admin_ids, manager_ids, log_service, save_state, last_menu_messages, ADMIN_ID
 from app.states.states import InventoryStates
+from app.state import iiko_async_service
+from app.texts.messages import build_shift_info_text
 from app.texts.messages import get_main_menu_text, build_inventory_text
 from app.keyboards.main_kb import get_main_menu, get_edit_categories_menu
 
@@ -44,7 +46,15 @@ async def cmd_start(message: Message, state: FSMContext, is_super: bool, is_mana
     user_name = users_db[user_id]
     role_text, has_access = get_user_role(is_super, is_manager, is_admin)
     
-    text = f"Рад видеть вас снова, <b>{user_name}</b>!\n\n{role_text}\n\n" + get_main_menu_text(inventory, has_access, user_name)
+       # Получаем информацию о смене (с защитой от ошибок)
+    try:
+        active_emps = await iiko_async_service.get_active_employees()
+        shift_text = build_shift_info_text(active_emps)
+    except Exception as e:
+        logging.warning(f"Не удалось получить информацию о смене: {e}")
+        shift_text = "👥 <b>Сегодня на смене:</b> <i>информация временно недоступна</i>"
+    
+    text = f"Рад видеть вас снова, <b>{user_name}</b>!\n\n{role_text}\n\n{shift_text}\n\n" + get_main_menu_text(inventory, has_access, user_name)
     msg = await message.answer(text, reply_markup=get_main_menu(has_access), parse_mode="HTML")
     
     last_menu_messages[user_id] = msg.message_id
@@ -95,7 +105,15 @@ async def cb_main_menu(callback: CallbackQuery, state: FSMContext, is_super: boo
     user_name = users_db.get(callback.from_user.id, "Сотрудник")
     role_text, has_access = get_user_role(is_super, is_manager, is_admin)
     
-    text = f"Рад видеть вас снова, <b>{user_name}</b>!\n\n{role_text}\n\n" + get_main_menu_text(inventory, has_access, user_name)
+        # Получаем информацию о смене
+    try:
+        active_emps = await iiko_async_service.get_active_employees()
+        shift_text = build_shift_info_text(active_emps)
+    except Exception as e:
+        logging.warning(f"Не удалось получить информацию о смене: {e}")
+        shift_text = "👥 <b>Сегодня на смене:</b> <i>информация временно недоступна</i>"
+    
+    text = f"Рад видеть вас снова, <b>{user_name}</b>!\n\n{role_text}\n\n{shift_text}\n\n" + get_main_menu_text(inventory, has_access, user_name)
     
     # ФИКС #2: если меню уже такое — используем текущее сообщение,
     # иначе msg оставался неинициализированным → UnboundLocalError
